@@ -171,5 +171,28 @@ if(P2D_BUILD_APP)
   target_link_libraries(imgui_texteditor PUBLIC ImGui-SFML::ImGui-SFML)
   target_compile_features(imgui_texteditor PUBLIC cxx_std_17)
 
+  # -------------------------------------------------------------------------
+  # tinyfiledialogs: native OS "Open File" dialog for the FileSystem panel's
+  # Upload Texture button (zenity/kdialog/... on Linux, the real Win32 file
+  # picker on Windows, no GTK/Qt dependency). Upstream is SourceForge, not
+  # GitHub, and has no tagged releases -- pinned to an exact commit (current
+  # master as of this writing) for reproducibility, same reasoning as
+  # ImGuiColorTextEdit above.
+  # -------------------------------------------------------------------------
+  FetchContent_Declare(
+    tinyfiledialogs_src
+    GIT_REPOSITORY https://git.code.sf.net/p/tinyfiledialogs/code
+    GIT_TAG 58f4a241a9afb2996e2beefc938fc8d5002da601
+  )
+  FetchContent_Populate(tinyfiledialogs_src)
+
+  add_library(tinyfiledialogs STATIC ${tinyfiledialogs_src_SOURCE_DIR}/tinyfiledialogs.c)
+  target_include_directories(tinyfiledialogs PUBLIC ${tinyfiledialogs_src_SOURCE_DIR})
+  if(WIN32)
+    # Not linked by tinyfiledialogs.c itself (no #pragma comment(lib, ...)
+    # in it) -- these back its native IFileOpenDialog/GetOpenFileNameW path.
+    target_link_libraries(tinyfiledialogs PUBLIC comdlg32 ole32 uuid shell32)
+  endif()
+
   add_subdirectory(app)
 endif()

@@ -33,14 +33,8 @@ private:
     // "Save Project As..." (bundles the selected project's scene.json +
     // scripts/ tree into one file, see ProjectBundle.hpp) and "Open Project
     // File..." (the reverse -- unpacks a bundle into a new project
-    // directory under root_) -- there's no native OS file picker linked
-    // into this project (see ProjectPaths.hpp's comment trail), so both are
-    // typed-path popups rather than a real "Save As"/"Open" dialog.
-    bool showSaveBundlePopup_ = false;
-    char saveBundlePathBuffer_[512] = {};
-    bool showOpenBundlePopup_ = false;
-    char openBundlePathBuffer_[512] = {};
-    char openBundleNameBuffer_[128] = {};
+    // directory under root_) both go straight through the native OS Save/
+    // Open dialog (tinyfiledialogs) -- no in-app popup or typed path needed.
     std::string lastBundleMessage_;
     bool lastBundleMessageIsError_ = false;
 

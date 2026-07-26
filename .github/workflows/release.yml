@@ -74,6 +74,8 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -91,10 +93,30 @@ jobs:
             echo "prerelease=true" >> "$GITHUB_OUTPUT"
           fi
 
+      # Pulls this tag's own section out of CHANGELOG.md (between its "##
+      # vX.Y.Z" heading and the next "## " heading) as the release body, so
+      # the notes on the GitHub Release page are the same ones written by
+      # hand in the changelog rather than a bare tag name. Falls back to a
+      # generic line if the tag has no matching section (e.g. the
+      # workflow_dispatch "nightly" build).
+      - name: Extract release notes from CHANGELOG.md
+        id: notes
+        shell: bash
+        run: |
+          awk -v tag="## ${{ steps.tag.outputs.tag }}" '
+            $0 == tag { found=1; next }
+            found && /^## / { found=0 }
+            found
+          ' CHANGELOG.md > /tmp/release_notes.md
+          if [ ! -s /tmp/release_notes.md ]; then
+            echo "See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/master/CHANGELOG.md) for details." > /tmp/release_notes.md
+          fi
+
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
           name: ${{ steps.tag.outputs.tag }}
+          body_path: /tmp/release_notes.md
           prerelease: ${{ steps.tag.outputs.prerelease }}
           make_latest: ${{ steps.tag.outputs.prerelease == 'false' }}
           files: |

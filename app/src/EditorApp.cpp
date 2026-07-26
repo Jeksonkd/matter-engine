@@ -5,6 +5,7 @@
 #include <imgui-SFML.h> // ImGui::Image(sf::RenderTexture, ...) overload used by the viewport panel
 #include <imgui.h>
 #include <imgui_internal.h> // DockBuilder* -- programmatic default layout, standard practice
+#include <tinyfiledialogs.h> // native "Open File" dialog for Upload Texture
 
 #include <SFML/Graphics/RectangleShape.hpp>
 #include <SFML/Graphics/VertexArray.hpp>
@@ -1255,6 +1256,17 @@ bool EditorApp::importImageFile(const std::filesystem::path& src, const std::fil
     return true;
 }
 
+void EditorApp::uploadTextureVia(const std::filesystem::path& destDir) {
+    std::vector<std::string> patterns;
+    for (const auto& ext : kImageExtensions) patterns.push_back("*" + ext);
+    std::vector<const char*> patternPtrs;
+    for (const auto& p : patterns) patternPtrs.push_back(p.c_str());
+
+    char* picked = tinyfd_openFileDialog("Upload Texture", "", static_cast<int>(patternPtrs.size()),
+                                          patternPtrs.data(), "Image files", 0);
+    if (picked) importImageFile(picked, destDir);
+}
+
 void EditorApp::importDroppedFiles(const std::vector<std::filesystem::path>& paths) {
     for (const auto& src : paths) importImageFile(src, scriptsDir_);
 }
@@ -1691,8 +1703,8 @@ void EditorApp::drawSettings() {
         ImGui::SetTooltip(
             "The Matter Kind every new body gets from the Spawn tool (viewport click). Doesn't\n"
             "affect bodies that already exist -- change an individual body's kind from its own\n"
-            "Inspector \"Matter Kind\" dropdown instead. Rigidbody by default: an ordinary body,\n"
-            "unaffected by any of Matter/OptiMatter's fidelity handling.");
+            "Inspector \"Matter Kind\" dropdown instead. OptiMatter by default: the cheapest,\n"
+            "highest-performance fidelity tier.");
 
     ImGui::TextUnformatted("Reset Scene");
     ImGui::Separator();
@@ -2301,12 +2313,36 @@ void EditorApp::drawFileSystemPanel() {
     ImGui::TextDisabled("%s", projectDir_.string().c_str());
     ImGui::Separator();
 
+    // The toolbar below used to be one unconditional row of SameLine()s,
+    // which meant buttons silently ran off the right edge (invisible, not
+    // just clipped) whenever this panel was narrower than the full row --
+    // a real problem since it's a dockable panel the user resizes freely.
+    // sameLineIfFits() reproduces imgui_demo's "manual wrapping" recipe:
+    // measure the NEXT label (SmallButton only zeroes FramePadding.y, so
+    // width is still CalcTextSize + FramePadding.x * 2), take the screen-
+    // space right edge of the button just drawn (GetItemRectMax), and only
+    // continue the current row if placing the next button there would
+    // still land before the panel's right edge -- otherwise let it fall
+    // through to a fresh row. GetContentRegionAvail() doesn't work for this:
+    // called right after a widget with no SameLine() yet, it already
+    // measures the NEXT (still empty) line, not what's left of the current
+    // one, so a naive "avail > next width" check is nearly always true and
+    // never actually wraps. Since this re-runs every frame, a wider panel
+    // naturally collapses back down to fewer rows.
+    ImGuiStyle& style = ImGui::GetStyle();
+    float fsToolbarRightEdge = ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMax().x;
+    auto sameLineIfFits = [&](const char* nextLabel) {
+        float w = ImGui::CalcTextSize(nextLabel).x + style.FramePadding.x * 2.0f;
+        float lastItemX2 = ImGui::GetItemRectMax().x;
+        if (lastItemX2 + style.ItemSpacing.x + w < fsToolbarRightEdge) ImGui::SameLine();
+    };
+
     if (ImGui::SmallButton("New Folder")) {
         newItemParentDir_ = scriptsDir_;
         newItemNameBuffer_[0] = '\0';
         showNewFolderPopup_ = true;
     }
-    ImGui::SameLine();
+    sameLineIfFits("New Script");
     if (ImGui::SmallButton("New Script")) {
         newItemParentDir_ = scriptsDir_;
         std::snprintf(newItemNameBuffer_, sizeof(newItemNameBuffer_), "new_script.lua");
@@ -2318,31 +2354,36 @@ void EditorApp::drawFileSystemPanel() {
                            "selected in the Inspector/Hierarchy immediately -- \"Plain Script\" is an\n"
                            "ordinary on_start/on_update stub with no host body, same as before UI\n"
                            "Elements existed.");
-    ImGui::SameLine();
-    if (ImGui::SmallButton("Upload Texture")) {
-        newItemParentDir_ = scriptsDir_;
-        uploadTexturePathBuffer_[0] = '\0';
-        showUploadTexturePopup_ = true;
-    }
+    sameLineIfFits("Upload Texture");
+    if (ImGui::SmallButton("Upload Texture")) uploadTextureVia(scriptsDir_);
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip(
-            "Copies an image file from elsewhere on disk into this project, since dragging one\n"
-            "in from the OS file manager isn't always reliable. Type or paste its full path.");
-    ImGui::SameLine();
+        ImGui::SetTooltip("Opens your OS's file picker; the image you choose is copied into this\n"
+                           "project's scripts folder.");
+    sameLineIfFits("Refresh");
     if (ImGui::SmallButton("Refresh")) refreshAvailableScripts();
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Rescan for files changed outside the editor.");
 
-    ImGui::SameLine();
-    ImGui::Dummy(ImVec2(8.0f, 0.0f));
-    ImGui::SameLine();
+    // The 8px gap only makes sense as a same-row separator -- if Copy
+    // wouldn't fit on this row anyway, skip straight to it on a new row
+    // rather than leaving a dangling gap at the start of that row.
+    {
+        float copyW = ImGui::CalcTextSize("Copy").x + style.FramePadding.x * 2.0f;
+        float lastItemX2 = ImGui::GetItemRectMax().x;
+        float gapAndCopyX2 = lastItemX2 + style.ItemSpacing.x + 8.0f + style.ItemSpacing.x + copyW;
+        if (gapAndCopyX2 < fsToolbarRightEdge) {
+            ImGui::SameLine();
+            ImGui::Dummy(ImVec2(8.0f, 0.0f));
+            ImGui::SameLine();
+        }
+    }
     ImGui::BeginDisabled(selectedFsPath_.empty());
     if (ImGui::SmallButton("Copy")) copyFsSelection();
     ImGui::EndDisabled();
-    ImGui::SameLine();
+    sameLineIfFits("Paste");
     ImGui::BeginDisabled(fsClipboardPath_.empty());
     if (ImGui::SmallButton("Paste")) pasteFsClipboard();
     ImGui::EndDisabled();
-    ImGui::SameLine();
+    sameLineIfFits("Delete");
     ImGui::BeginDisabled(selectedFsPath_.empty());
     if (ImGui::SmallButton("Delete")) deleteFsSelection();
     ImGui::EndDisabled();
@@ -2411,11 +2452,7 @@ void EditorApp::drawFileTreeNode(const std::filesystem::path& dir) {
                     newScriptKindIdx_ = 0;
                     showNewScriptPopup_ = true;
                 }
-                if (ImGui::MenuItem("Upload Texture")) {
-                    newItemParentDir_ = entry.path();
-                    uploadTexturePathBuffer_[0] = '\0';
-                    showUploadTexturePopup_ = true;
-                }
+                if (ImGui::MenuItem("Upload Texture")) uploadTextureVia(entry.path());
                 ImGui::Separator();
                 if (ImGui::MenuItem("Copy")) copyFsSelection();
                 ImGui::BeginDisabled(fsClipboardPath_.empty());
@@ -2504,11 +2541,6 @@ void EditorApp::drawFileSystemPopups() {
         ImGui::OpenPopup("New Script##fs");
         showNewScriptPopup_ = false;
     }
-    if (showUploadTexturePopup_) {
-        ImGui::OpenPopup("Upload Texture##fs");
-        showUploadTexturePopup_ = false;
-    }
-
     if (ImGui::BeginPopupModal("New Folder##fs", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::TextUnformatted("Folder name:");
         ImGui::InputText("##foldername", newItemNameBuffer_, sizeof(newItemNameBuffer_));
@@ -2562,19 +2594,6 @@ void EditorApp::drawFileSystemPopups() {
         ImGui::EndPopup();
     }
 
-    if (ImGui::BeginPopupModal("Upload Texture##fs", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::TextUnformatted("Source image path:");
-        ImGui::SetNextItemWidth(400.0f);
-        ImGui::InputText("##uploadtexturepath", uploadTexturePathBuffer_, sizeof(uploadTexturePathBuffer_));
-        ImGui::TextDisabled("Copies this file into %s", newItemParentDir_.string().c_str());
-        if (ImGui::Button("Upload")) {
-            if (uploadTexturePathBuffer_[0] != '\0') importImageFile(uploadTexturePathBuffer_, newItemParentDir_);
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
-        ImGui::EndPopup();
-    }
 }
 
 void EditorApp::drawCodeEditorPanel() {

@@ -111,9 +111,11 @@ private:
     // hence the toggle rather than always drawing it.
     bool showCircleDirectionLines_ = true;
     // Applied to every body the Spawn tool creates (spawnAt()) -- see
-    // Settings' "Default Matter Kind" dropdown. MatterKind::Rigidbody by
-    // default, matching Body::matterKind's own field default.
-    MatterKind defaultSpawnMatterKind_ = MatterKind::Rigidbody;
+    // Settings' "Default Matter Kind" dropdown. OptiMatter by default (best
+    // out-of-the-box performance for a new scene); Body::matterKind's own
+    // field default stays Rigidbody for bodies created any other way
+    // (scripts, joints), which don't go through this setting at all.
+    MatterKind defaultSpawnMatterKind_ = MatterKind::OptiMatter;
 
     // --- Background: a flat color always, an optional image drawn over it
     // (tiled, anchored to world space, or stretched to the current view) --
@@ -289,13 +291,6 @@ private:
     bool showNewScriptPopup_ = false;
     std::filesystem::path newItemParentDir_;
     char newItemNameBuffer_[128] = {};
-    // "Upload Texture" popup: a typed source path (there's no native OS file
-    // picker linked into this project -- see ProjectPaths.hpp's comment
-    // trail) copied into newItemParentDir_, same collision-avoidance
-    // (numeric suffix) importDroppedFiles() uses for OS-drag-drop imports.
-    // A reliable alternative to that path, not a replacement for it.
-    bool showUploadTexturePopup_ = false;
-    char uploadTexturePathBuffer_[512] = {};
     int nextUiElementId_ = 0; // for unique host-body names/positions, see createUiElement()
     // "Kind" combo for the Hierarchy panel's "Create" button -- index into
     // kCreateKinds (see EditorApp.cpp): physics shapes (Circle/Box/Triangle/
@@ -467,6 +462,10 @@ private:
     // than overwriting. Logs and returns false on any failure (not a
     // recognized image, doesn't exist, copy error); true on success.
     bool importImageFile(const std::filesystem::path& src, const std::filesystem::path& destDir);
+    // Opens the native OS "Open File" dialog (tinyfiledialogs), filtered to
+    // kImageExtensions, and importImageFile()s whatever the user picks into
+    // `destDir`. No-op (just returns) if the dialog is cancelled.
+    void uploadTextureVia(const std::filesystem::path& destDir);
     Vec2 viewportPixelToWorld(sf::Vector2i windowPixel) const;
 
     void buildDockLayout(unsigned int dockspaceId);

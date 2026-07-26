@@ -18,6 +18,7 @@ target_link_libraries(p2d_editor PRIVATE
   sfml-system
   ImGui-SFML::ImGui-SFML
   imgui_texteditor
+  tinyfiledialogs
   nlohmann_json::nlohmann_json
 )
 

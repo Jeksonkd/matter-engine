@@ -2,8 +2,10 @@
 #include "ProjectBundle.hpp"
 
 #include <imgui.h>
+#include <tinyfiledialogs.h>
 
 #include <cstring>
+#include <fstream>
 
 namespace p2d::app {
 
@@ -68,8 +70,16 @@ std::optional<std::filesystem::path> ProjectManagerScreen::drawUI() {
     if (ImGui::Button("Save Project As...")) {
         const std::string& name = projects_[static_cast<size_t>(selectedIndex_)].name;
         std::filesystem::path suggested = root_.parent_path() / (name + ".p2dproj");
-        std::snprintf(saveBundlePathBuffer_, sizeof(saveBundlePathBuffer_), "%s", suggested.string().c_str());
-        showSaveBundlePopup_ = true;
+        const char* filters[] = {"*.p2dproj"};
+        char* picked = tinyfd_saveFileDialog("Save Project As", suggested.string().c_str(), 1, filters,
+                                              "Matter Engine project bundle");
+        if (picked) {
+            auto log = [this](const std::string& msg, bool isError) {
+                lastBundleMessage_ = msg;
+                lastBundleMessageIsError_ = isError;
+            };
+            saveProjectToFile(projects_[static_cast<size_t>(selectedIndex_)].path, picked, log);
+        }
     }
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Bundles the selected project's scene + scripts into a single file, so it\n"
@@ -77,9 +87,37 @@ std::optional<std::filesystem::path> ProjectManagerScreen::drawUI() {
     ImGui::EndDisabled();
     ImGui::SameLine();
     if (ImGui::Button("Open Project File...")) {
-        openBundlePathBuffer_[0] = '\0';
-        openBundleNameBuffer_[0] = '\0';
-        showOpenBundlePopup_ = true;
+        const char* filters[] = {"*.p2dproj"};
+        char* picked = tinyfd_openFileDialog("Open Project File", "", 1, filters,
+                                              "Matter Engine project bundle", 0);
+        if (picked) {
+            // Destination project name comes from the bundle's own filename
+            // (its stem), same "don't clobber an existing one" numeric-
+            // suffix rule importImageFile() uses for name collisions --
+            // there's no separate name-entry step, matching Upload
+            // Texture's one-dialog-and-done flow.
+            std::filesystem::path bundlePath(picked);
+            std::string stem = bundlePath.stem().string();
+            std::filesystem::path destDir = root_ / stem;
+            std::error_code existsEc;
+            for (int suffix = 1; std::filesystem::exists(destDir, existsEc); ++suffix) {
+                destDir = root_ / (stem + "_" + std::to_string(suffix));
+            }
+
+            auto log = [this](const std::string& msg, bool isError) {
+                lastBundleMessage_ = msg;
+                lastBundleMessageIsError_ = isError;
+            };
+            if (loadProjectFromFile(bundlePath, destDir, log)) {
+                refresh();
+                for (size_t i = 0; i < projects_.size(); ++i) {
+                    if (projects_[i].path == destDir) {
+                        selectedIndex_ = static_cast<int>(i);
+                        break;
+                    }
+                }
+            }
+        }
     }
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Unpacks a project bundle file (see Save Project As...) into a new project\n"
@@ -125,6 +163,15 @@ std::optional<std::filesystem::path> ProjectManagerScreen::drawUI() {
                 std::error_code existsEc;
                 if (!std::filesystem::exists(projectPath, existsEc)) {
                     ensureProjectScaffold(projectPath / "scripts", nullptr);
+                    // An empty scene.json (just "{}") makes EditorApp's
+                    // loadSceneFromDisk() succeed with zero bodies instead of
+                    // falling back to resetScene()'s hardcoded starter scene
+                    // (floor/walls/balls + spawn_balls.lua) -- that starter
+                    // scene is reserved for the one seeded "MyProject" sample
+                    // (see ProjectManagerScreen's constructor), so every
+                    // project the user explicitly creates opens genuinely
+                    // blank: no objects, no scripts.
+                    std::ofstream(projectPath / "scene.json") << "{}";
                     refresh();
                     openRequest = projectPath;
                 }
@@ -155,66 +202,6 @@ std::optional<std::filesystem::path> ProjectManagerScreen::drawUI() {
             }
             ImGui::SameLine();
         }
-        if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
-        ImGui::EndPopup();
-    }
-
-    // --- Save Project As... popup -------------------------------------------
-    if (showSaveBundlePopup_) {
-        ImGui::OpenPopup("Save Project As##pm");
-        showSaveBundlePopup_ = false;
-    }
-    if (ImGui::BeginPopupModal("Save Project As##pm", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::TextUnformatted("Bundle file path:");
-        ImGui::SetNextItemWidth(450.0f);
-        ImGui::InputText("##savebundlepath", saveBundlePathBuffer_, sizeof(saveBundlePathBuffer_));
-        if (hasSelection) {
-            if (ImGui::Button("Save")) {
-                auto log = [this](const std::string& msg, bool isError) {
-                    lastBundleMessage_ = msg;
-                    lastBundleMessageIsError_ = isError;
-                };
-                saveProjectToFile(projects_[static_cast<size_t>(selectedIndex_)].path, saveBundlePathBuffer_, log);
-                ImGui::CloseCurrentPopup();
-            }
-            ImGui::SameLine();
-        }
-        if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
-        ImGui::EndPopup();
-    }
-
-    // --- Open Project File... popup -----------------------------------------
-    if (showOpenBundlePopup_) {
-        ImGui::OpenPopup("Open Project File##pm");
-        showOpenBundlePopup_ = false;
-    }
-    if (ImGui::BeginPopupModal("Open Project File##pm", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::TextUnformatted("Bundle file path:");
-        ImGui::SetNextItemWidth(450.0f);
-        ImGui::InputText("##openbundlepath", openBundlePathBuffer_, sizeof(openBundlePathBuffer_));
-        ImGui::TextUnformatted("New project name:");
-        ImGui::SetNextItemWidth(300.0f);
-        ImGui::InputText("##openbundlename", openBundleNameBuffer_, sizeof(openBundleNameBuffer_));
-        if (ImGui::Button("Open")) {
-            if (openBundlePathBuffer_[0] != '\0' && openBundleNameBuffer_[0] != '\0') {
-                auto log = [this](const std::string& msg, bool isError) {
-                    lastBundleMessage_ = msg;
-                    lastBundleMessageIsError_ = isError;
-                };
-                std::filesystem::path destDir = root_ / openBundleNameBuffer_;
-                if (loadProjectFromFile(openBundlePathBuffer_, destDir, log)) {
-                    refresh();
-                    for (size_t i = 0; i < projects_.size(); ++i) {
-                        if (projects_[i].path == destDir) {
-                            selectedIndex_ = static_cast<int>(i);
-                            break;
-                        }
-                    }
-                }
-            }
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::SameLine();
         if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
     }
@@ -485,8 +472,9 @@ void ProjectManagerScreen::drawDocumentation() {
         ImGui::BulletText("Save Project As... / Open Project File... (Project Manager toolbar) bundle a\n"
                            "whole project -- scene.json plus every file under scripts/ -- into a single\n"
                            ".p2dproj file and back, so a project can be shared or backed up without the\n"
-                           "whole ~/Physics2DProjects folder. There's no native OS file picker linked\n"
-                           "into this build, so both are typed-path popups rather than a real dialog.");
+                           "whole ~/Physics2DProjects folder. Both open your OS's native Save/Open file\n"
+                           "dialog; Open Project File... names the new project after the bundle's own\n"
+                           "filename.");
     }
 
     ImGui::EndChild();
