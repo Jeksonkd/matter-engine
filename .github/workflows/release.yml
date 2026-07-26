@@ -68,6 +68,11 @@ jobs:
   release:
     needs: [build-linux, build-windows]
     runs-on: ubuntu-latest
+    # Default GITHUB_TOKEN is read-only unless a job/workflow explicitly asks
+    # for more -- without this, softprops/action-gh-release fails to create
+    # the release with a 403.
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
