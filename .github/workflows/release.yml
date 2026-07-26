@@ -1,0 +1,97 @@
+name: Release
+
+# Tag pushes (v1.2.3, v0.1.0, ...) build and publish a real GitHub Release.
+# workflow_dispatch lets this be re-run by hand (e.g. to fix a build issue)
+# without needing to push a brand new tag each time -- that path publishes
+# to a fixed, always-overwritten "nightly" prerelease instead.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # SFML's own Linux build dependencies (X11/OpenGL/udev) -- audio is
+      # disabled (SFML_BUILD_AUDIO OFF in CMakeLists.txt), so no
+      # flac/vorbis/openal packages are needed here.
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev \
+            libudev-dev libgl1-mesa-dev libfreetype-dev
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DP2D_BUILD_TESTS=OFF
+
+      - name: Build
+        run: cmake --build build --config Release -j
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          strip -o dist/matter-engine-linux-x86_64 build/app/p2d_editor
+          chmod +x dist/matter-engine-linux-x86_64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: matter-engine-linux-x86_64
+          path: dist/matter-engine-linux-x86_64
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DP2D_BUILD_TESTS=OFF
+
+      - name: Build
+        run: cmake --build build --config Release -j
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp build/app/Release/p2d_editor.exe dist/matter-engine-windows-x86_64.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: matter-engine-windows-x86_64
+          path: dist/matter-engine-windows-x86_64.exe
+
+  release:
+    needs: [build-linux, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Determine release tag
+        id: tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=nightly" >> "$GITHUB_OUTPUT"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
+          prerelease: ${{ steps.tag.outputs.prerelease }}
+          make_latest: ${{ steps.tag.outputs.prerelease == 'false' }}
+          files: |
+            dist/matter-engine-linux-x86_64
+            dist/matter-engine-windows-x86_64.exe

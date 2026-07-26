@@ -9,6 +9,15 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 
+# Static MSVC runtime (/MT, not the default /MD) so a built .exe doesn't
+# need the Visual C++ Redistributable installed on the machine that runs
+# it -- matches the "static to keep the binary self-contained" choice
+# already made for SFML below, just for the C++ runtime itself. No-op on
+# every other compiler/platform.
+if(MSVC)
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
 option(P2D_BUILD_APP "Build the SFML+ImGui visual editor" ON)
 option(P2D_BUILD_TESTS "Build headless engine smoke tests" ON)
 
@@ -35,8 +44,18 @@ list(REMOVE_ITEM P2D_LUA_SOURCES
 )
 add_library(lua_static STATIC ${P2D_LUA_SOURCES})
 target_include_directories(lua_static PUBLIC ${lua_src_SOURCE_DIR})
-target_compile_definitions(lua_static PRIVATE LUA_USE_LINUX)
-target_link_libraries(lua_static PUBLIC ${CMAKE_DL_LIBS} m)
+# Platform macro controls which optional POSIX/Windows bits Lua's own
+# luaconf.h enables (dynamic library loading for require(), mainly) -- both
+# LUA_USE_LINUX and "m" (the math library) are Linux/POSIX-specific and
+# don't exist as such on Windows (math functions are already in the MSVC
+# CRT, and there's no separate libm to link against).
+target_link_libraries(lua_static PUBLIC ${CMAKE_DL_LIBS})
+if(WIN32)
+  target_compile_definitions(lua_static PRIVATE LUA_USE_WINDOWS)
+elseif(UNIX)
+  target_compile_definitions(lua_static PRIVATE LUA_USE_LINUX)
+  target_link_libraries(lua_static PUBLIC m)
+endif()
 
 # ---------------------------------------------------------------------------
 # sol2 (header-only Lua binding library) -- used purely as headers, its own
