@@ -37,6 +37,15 @@ target_link_libraries(p2d_matter_test PRIVATE p2d_engine)
 add_executable(p2d_body_matter_kind_test body_matter_kind_test.cpp)
 target_link_libraries(p2d_body_matter_kind_test PRIVATE p2d_engine)
 
+add_executable(p2d_queries_test queries_test.cpp)
+target_link_libraries(p2d_queries_test PRIVATE p2d_engine)
+
+add_executable(p2d_joint_test joint_test.cpp)
+target_link_libraries(p2d_joint_test PRIVATE p2d_engine)
+
+add_executable(p2d_ccd_test ccd_test.cpp)
+target_link_libraries(p2d_ccd_test PRIVATE p2d_engine)
+
 # ScenePersistence.{hpp,cpp} deliberately have no SFML/ImGui/ScriptEngine
 # dependency (see its header comment), so this test builds/runs independent
 # of P2D_BUILD_APP and without needing a display, the same way
@@ -78,6 +87,9 @@ add_test(NAME mass_overlap_test COMMAND p2d_mass_overlap_test)
 add_test(NAME friction_jitter_test COMMAND p2d_friction_jitter_test)
 add_test(NAME matter_test COMMAND p2d_matter_test)
 add_test(NAME body_matter_kind_test COMMAND p2d_body_matter_kind_test)
+add_test(NAME queries_test COMMAND p2d_queries_test)
+add_test(NAME joint_test COMMAND p2d_joint_test)
+add_test(NAME ccd_test COMMAND p2d_ccd_test)
 add_test(NAME scene_persistence_test COMMAND p2d_scene_persistence_test)
 add_test(NAME script_test COMMAND p2d_script_test)
 add_test(NAME bacteria_test COMMAND p2d_bacteria_test)

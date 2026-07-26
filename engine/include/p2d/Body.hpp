@@ -57,6 +57,20 @@ public:
     // *either* body in the pair is a sensor.
     bool isSensor = false;
 
+    // Collision filtering (Box2D-style categories/masks): two bodies (or a
+    // Body and a Matter particle) collide only if EACH one's category is
+    // present in the OTHER's mask -- `(a.collisionCategory & b.collisionMask)
+    // != 0 && (b.collisionCategory & a.collisionMask) != 0`. Checked in
+    // World::broadAndNarrowPhase() before any narrowphase geometry test runs
+    // at all, so a filtered-out pair costs nothing beyond the bitwise check.
+    // Defaults (category bit 0 set, mask all-ones) mean "collide with
+    // everything," so existing scenes are unaffected until a script/the
+    // Inspector actually changes one. Also consulted by World::raycastClosest()/
+    // raycastAll() via their own `mask` parameter, checked against a
+    // candidate's collisionCategory the same way.
+    uint16_t collisionCategory = 0x0001;
+    uint16_t collisionMask = 0xFFFF;
+
     // Simulation-fidelity dial -- see MatterKind (Matter.hpp) for the full
     // explanation. Rigidbody (the default) is an ordinary rigidbody,
     // entirely unaffected by any of this. Setting it to Matter or

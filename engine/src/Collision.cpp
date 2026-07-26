@@ -305,6 +305,86 @@ bool generateMatterContact(Matter& a, Matter& b, MatterContact& out) {
     return true;
 }
 
+bool raycastCircle(Vec2 origin, Vec2 dir, Vec2 center, float radius, RaycastHit& out) {
+    // Solve |origin + t*dir - center|^2 = radius^2 for the smallest t in
+    // [0, 1] -- standard quadratic-formula circle raycast (same approach as
+    // Box2D's b2CircleShape::RayCast).
+    Vec2 s = origin - center;
+    float b = s.dot(dir);
+    float rr = dir.dot(dir);
+    if (rr < 1e-12f) return false;
+    float c = s.dot(s) - radius * radius;
+
+    float sigma = b * b - rr * c;
+    if (sigma < 0.0f) return false;
+
+    float t = (-b - std::sqrt(sigma)) / rr;
+    if (t < 0.0f || t > 1.0f) return false; // origin already inside, or hit beyond the ray's far end
+
+    out.fraction = t;
+    out.point = origin + dir * t;
+    out.normal = (out.point - center).normalized();
+    return true;
+}
+
+bool raycastPolygon(Vec2 origin, Vec2 dir, const Body& polyBody, RaycastHit& out, float inflateRadius) {
+    // Transform the ray into the polygon's local space rather than
+    // transforming every vertex/normal into world space -- same slab-
+    // clipping algorithm Box2D's b2PolygonShape::RayCast uses: each edge's
+    // half-plane either can't affect [lower, upper] (ray parallel to it,
+    // origin already on the inside), or clips one end of the range:
+    // entering half-planes (denominator < 0) can only raise `lower`,
+    // exiting ones (denominator > 0) can only lower `upper`. Once
+    // upper < lower, no fraction satisfies every edge simultaneously.
+    Vec2 localOrigin = rotate(origin - polyBody.position, -polyBody.rotation);
+    Vec2 localDir = rotate(dir, -polyBody.rotation);
+
+    const ShapeData& poly = polyBody.shape;
+    float lower = 0.0f;
+    float upper = 1.0f;
+    int hitEdge = -1;
+
+    for (size_t i = 0; i < poly.vertices.size(); ++i) {
+        // + inflateRadius shifts each face's effective plane outward by
+        // that amount (see this function's doc comment in Collision.hpp for
+        // the derivation) -- 0 for an ordinary point raycast, leaves the
+        // rest of the algorithm untouched either way.
+        float numerator = poly.normals[i].dot(poly.vertices[i] - localOrigin) + inflateRadius;
+        float denominator = poly.normals[i].dot(localDir);
+
+        if (denominator == 0.0f) {
+            if (numerator < 0.0f) return false; // origin outside this edge, ray never enters
+        } else {
+            if (denominator < 0.0f && numerator < lower * denominator) {
+                lower = numerator / denominator;
+                hitEdge = static_cast<int>(i);
+            } else if (denominator > 0.0f && numerator < upper * denominator) {
+                upper = numerator / denominator;
+            }
+        }
+        if (upper < lower) return false;
+    }
+
+    if (hitEdge < 0) return false; // origin starts inside the polygon -- no entry surface to report
+
+    out.fraction = lower;
+    Vec2 localPoint = localOrigin + localDir * lower;
+    out.point = polyBody.toWorldPoint(localPoint);
+    out.normal = rotate(poly.normals[static_cast<size_t>(hitEdge)], polyBody.rotation);
+    return true;
+}
+
+bool pointInBody(const Body& body, Vec2 point) {
+    if (body.shape.type == ShapeType::Circle) {
+        return (point - body.position).lengthSq() <= body.shape.radius * body.shape.radius;
+    }
+    Vec2 local = rotate(point - body.position, -body.rotation);
+    for (size_t i = 0; i < body.shape.vertices.size(); ++i) {
+        if (body.shape.normals[i].dot(local - body.shape.vertices[i]) > 0.0f) return false;
+    }
+    return true;
+}
+
 bool generateMatterBodyContact(Matter& matter, Body& body, MatterBodyContact& out) {
     Contact geo;
     bool hit;

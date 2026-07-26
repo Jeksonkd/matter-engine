@@ -3,6 +3,7 @@
 #include "p2d/BroadPhase.hpp"
 #include "p2d/Body.hpp"
 #include "p2d/Collision.hpp"
+#include "p2d/Joint.hpp"
 #include "p2d/Matter.hpp"
 
 #include <cstdint>
@@ -31,6 +32,44 @@ public:
     // performance bound.
     float continuousDisplacementFraction = 0.5f;
     int maxSubsteps = 8;
+
+    // --- Continuous collision detection (circle movers only, opt-in) ---
+    // Adaptive substepping above mitigates tunneling by shrinking the step
+    // size, but an extreme enough speed vs. a thin enough wall can still
+    // outrun it (substeps are capped at maxSubsteps for a worst-case
+    // performance bound) -- see the README's "Known limitations." This is
+    // a genuine (not just finer-substepped) swept time-of-impact check,
+    // layered on top: after integrateVelocities() moves a Dynamic circle
+    // Body or a Matter particle, if it moved further this substep than
+    // ccdMinMovementFraction * its own radius, its straight-line path is
+    // swept (collision::raycastCircle/raycastPolygon) against every other
+    // Body/Matter, and if that path crosses something's surface, its
+    // position is pulled back to just short of the first impact point --
+    // so the very next step's ordinary discrete narrowphase finds a small,
+    // sane overlap to resolve normally, instead of the object having
+    // already passed clean through. Deliberately scoped to circle movers
+    // only (not polygon movers) -- a swept-POLYGON-vs-polygon time-of-impact
+    // test is a substantially larger undertaking, and a fast circle
+    // (bullet, particle, ball) is the overwhelmingly common tunneling
+    // case in practice. The target being swept against is treated as
+    // stationary for the duration of the sweep (not itself continuously
+    // moving) -- correct for a fast mover vs. anything slow/static (the
+    // common case), an approximation for two things both moving very fast
+    // at once.
+    //
+    // OFF by default (enableCcd = false) and skips any mover whose own
+    // matterKind/kind is OptiMatter even when on -- this check has no
+    // broadphase acceleration of its own (it sweeps against EVERY other
+    // Body/Matter, unconditionally), so turning it on on a scene with many
+    // simultaneously-fast-moving circles (hundreds freefalling at once, say)
+    // is a real O(n)-per-mover cost, not a free accuracy upgrade. Confirmed
+    // via tests/broadphase_test.cpp's 2000-body performance budget, which
+    // regressed roughly 5x when this was briefly unconditional -- exactly
+    // the scenario this default-off/OptiMatter-exempt scoping avoids. Turn
+    // it on for scenes with a modest number of fast movers (a few bullets,
+    // not a few hundred) that specifically need the stronger guarantee.
+    bool enableCcd = false;
+    float ccdMinMovementFraction = 0.5f;
 
     // Caps how far correctPositions() will nudge a single contact point
     // apart in one step (meters), regardless of how deep the penetration
@@ -93,6 +132,55 @@ public:
     void step(float dt);
 
     void clear();
+
+    // A single raycast/query result -- exactly one of `body`/`matter` is
+    // non-null, whichever kind of thing was actually hit.
+    struct RaycastResult {
+        Body* body = nullptr;
+        Matter* matter = nullptr;
+        Vec2 point;
+        Vec2 normal;
+        float fraction = 0.0f; // 0..1 along the origin->target segment
+    };
+
+    // Casts a ray from `origin` to `target` against every Body and Matter
+    // particle in the world, and reports the CLOSEST hit (smallest
+    // fraction), if any. `mask` is checked against each candidate's own
+    // collisionCategory (same bitwise rule as ordinary collision filtering,
+    // see Body::collisionCategory) -- the default (0xFFFF) hits anything.
+    // A ray starting inside a shape never reports a hit for that shape (see
+    // collision::raycastCircle/raycastPolygon).
+    bool raycastClosest(Vec2 origin, Vec2 target, RaycastResult& outResult, uint16_t mask = 0xFFFF) const;
+
+    // Same cast, but every hit along the segment, sorted by fraction
+    // (nearest first) rather than just the closest one.
+    std::vector<RaycastResult> raycastAll(Vec2 origin, Vec2 target, uint16_t mask = 0xFFFF) const;
+
+    // The topmost (last-created, i.e. last in bodies()) Body whose shape
+    // contains `point`, or nullptr if none does -- the same point-in-shape
+    // test EditorApp's own click-to-select uses, generalized for scripts.
+    Body* queryPoint(Vec2 point, uint16_t mask = 0xFFFF) const;
+
+    // --- Rigid joints (see Joint.hpp) -- all four take a WORLD-space
+    // anchor point (or two, for DistanceJoint, plus its own length),
+    // converted once to each body's local space at creation time. Returned
+    // pointers stay valid until removed (stable storage, like Body*/Matter*)
+    // -- pass one to the matching remove*Joint() below to delete it.
+    DistanceJoint* createDistanceJoint(Body* a, Body* b, Vec2 worldAnchorA, Vec2 worldAnchorB);
+    RevoluteJoint* createRevoluteJoint(Body* a, Body* b, Vec2 worldAnchor);
+    WeldJoint* createWeldJoint(Body* a, Body* b, Vec2 worldAnchor);
+    // `worldAxis` need not be normalized; it's normalized internally.
+    PrismaticJoint* createPrismaticJoint(Body* a, Body* b, Vec2 worldAnchor, Vec2 worldAxis);
+
+    void removeDistanceJoint(DistanceJoint* j);
+    void removeRevoluteJoint(RevoluteJoint* j);
+    void removeWeldJoint(WeldJoint* j);
+    void removePrismaticJoint(PrismaticJoint* j);
+
+    const std::vector<std::unique_ptr<DistanceJoint>>& distanceJoints() const { return distanceJoints_; }
+    const std::vector<std::unique_ptr<RevoluteJoint>>& revoluteJoints() const { return revoluteJoints_; }
+    const std::vector<std::unique_ptr<WeldJoint>>& weldJoints() const { return weldJoints_; }
+    const std::vector<std::unique_ptr<PrismaticJoint>>& prismaticJoints() const { return prismaticJoints_; }
 
     // Called once per contact point that is currently touching, right after
     // narrowphase, before the impulse solver runs. Useful for gameplay/script
@@ -180,12 +268,49 @@ private:
     std::vector<MatterBodyConstraint> matterBodyConstraintCache_;
     int nextMatterId_ = 0;
 
+    // Joint constraint caches -- same idea as ContactConstraint above
+    // (geometry/effective-mass terms computed once per step, reused across
+    // every velocityIterations pass), one struct per joint TYPE since each
+    // constrains different DOF (see Joint.hpp).
+    struct DistanceJointConstraint {
+        Vec2 rA, rB;
+        Vec2 u; // unit vector from A's anchor to B's anchor
+        float mass = 0.0f;
+    };
+    struct RevoluteJointConstraint {
+        Vec2 rA, rB;
+        float k11 = 0.0f, k12 = 0.0f, k22 = 0.0f; // 2x2 effective mass matrix (symmetric)
+    };
+    struct WeldJointConstraint {
+        Vec2 rA, rB;
+        float k11 = 0.0f, k12 = 0.0f, k22 = 0.0f;
+        float angleMass = 0.0f;
+    };
+    struct PrismaticJointConstraint {
+        Vec2 axis, perp;
+        float s1 = 0.0f, s2 = 0.0f; // perpendicular-constraint Jacobian terms, see Joint.hpp
+        float perpMass = 0.0f;
+        float angleMass = 0.0f;
+    };
+
+    std::vector<std::unique_ptr<DistanceJoint>> distanceJoints_;
+    std::vector<std::unique_ptr<RevoluteJoint>> revoluteJoints_;
+    std::vector<std::unique_ptr<WeldJoint>> weldJoints_;
+    std::vector<std::unique_ptr<PrismaticJoint>> prismaticJoints_;
+    std::vector<DistanceJointConstraint> distanceJointConstraintCache_;
+    std::vector<RevoluteJointConstraint> revoluteJointConstraintCache_;
+    std::vector<WeldJointConstraint> weldJointConstraintCache_;
+    std::vector<PrismaticJointConstraint> prismaticJointConstraintCache_;
+
     int computeSubstepCount(float dt) const;
     void integrateForces(float dt);
     void broadAndNarrowPhase();
     void solveVelocities();
+    void solveJointVelocities();
     void integrateVelocities(float dt);
+    void applyCcd(float dt);
     void correctPositions();
+    void correctJointPositions();
     void updateSleepState(float dt);
 };
 

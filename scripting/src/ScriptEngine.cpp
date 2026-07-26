@@ -97,6 +97,11 @@ void ScriptEngine::bindWorld(World& world) {
         "ui_hide_text", &Body::uiHideText,
         "texture_path", &Body::texturePath,
         "matter_kind", &Body::matterKind,
+        // Collision filtering (Box2D-style): two things collide only if
+        // EACH side's category is present in the OTHER's mask. Defaults
+        // (category bit 0, mask all-ones) collide with everything.
+        "collision_category", &Body::collisionCategory,
+        "collision_mask", &Body::collisionMask,
         // Read: 0 for a non-circle shape, same convention as the getter
         // always had. Write: only takes effect if this body is ALREADY a
         // circle (silently ignored otherwise, same as the Inspector's
@@ -190,6 +195,9 @@ void ScriptEngine::bindWorld(World& world) {
         "gravity_scale", &Matter::gravityScale,
         "name", &Matter::name,
         "matter_kind", &Matter::kind,
+        // Same collision filtering scheme as Body::collision_category/mask.
+        "collision_category", &Matter::collisionCategory,
+        "collision_mask", &Matter::collisionMask,
         // Wrapped (unlike Body's plain member-pointer fields) so changing
         // it recomputes mass immediately, matching density's own setter
         // just below -- a plain property here would leave mass stale until
@@ -345,7 +353,96 @@ void ScriptEngine::bindWorld(World& world) {
             for (auto& m : w.matter())
                 if (m->kind == kind) t[i++] = m.get();
             return t;
-        });
+        },
+        // Casts a ray from (x1,y1) to (x2,y2) -- mask (default: hits
+        // anything) is checked against each candidate's own
+        // collision_category, same rule as ordinary collision filtering.
+        // Returns nil if nothing was hit, otherwise a table: body (or nil),
+        // matter (or nil, whichever kind was actually hit), x/y (world
+        // point), nx/ny (surface normal), fraction (0-1 along the segment).
+        "raycast_closest",
+        [this](World& w, float x1, float y1, float x2, float y2, sol::optional<int> mask) -> sol::object {
+            World::RaycastResult result;
+            bool got = w.raycastClosest({x1, y1}, {x2, y2}, result,
+                                         mask ? static_cast<uint16_t>(*mask) : uint16_t{0xFFFF});
+            if (!got) return sol::lua_nil;
+            sol::table t = lua_.create_table();
+            t["body"] = result.body;
+            t["matter"] = result.matter;
+            t["x"] = result.point.x;
+            t["y"] = result.point.y;
+            t["nx"] = result.normal.x;
+            t["ny"] = result.normal.y;
+            t["fraction"] = result.fraction;
+            return t;
+        },
+        // Same cast, but every hit along the segment (same table shape as
+        // raycast_closest above), 1-indexed and sorted nearest-first.
+        "raycast_all",
+        [this](World& w, float x1, float y1, float x2, float y2, sol::optional<int> mask) {
+            auto hits = w.raycastAll({x1, y1}, {x2, y2}, mask ? static_cast<uint16_t>(*mask) : uint16_t{0xFFFF});
+            sol::table t = lua_.create_table(static_cast<int>(hits.size()), 0);
+            int i = 1;
+            for (auto& h : hits) {
+                sol::table ht = lua_.create_table();
+                ht["body"] = h.body;
+                ht["matter"] = h.matter;
+                ht["x"] = h.point.x;
+                ht["y"] = h.point.y;
+                ht["nx"] = h.normal.x;
+                ht["ny"] = h.normal.y;
+                ht["fraction"] = h.fraction;
+                t[i++] = ht;
+            }
+            return t;
+        },
+        // The topmost Body whose shape contains (x,y), or nil.
+        "query_point",
+        [](World& w, float x, float y, sol::optional<int> mask) {
+            return w.queryPoint({x, y}, mask ? static_cast<uint16_t>(*mask) : uint16_t{0xFFFF});
+        },
+        // Rigid joints (see Joint.hpp) -- bilateral constraints solved by
+        // the same sequential-impulse solver contacts use, NOT a force
+        // (contrast create_spring, which is genuinely springy). Each takes
+        // world-space anchor point(s); DistanceJoint's rest length is
+        // whatever distance apart the two anchors are at creation time.
+        "create_distance_joint",
+        [](World& w, Body* a, Body* b, float ax, float ay, float bx, float by) {
+            return (a && b) ? w.createDistanceJoint(a, b, {ax, ay}, {bx, by}) : nullptr;
+        },
+        "create_revolute_joint",
+        [](World& w, Body* a, Body* b, float ax, float ay) {
+            return (a && b) ? w.createRevoluteJoint(a, b, {ax, ay}) : nullptr;
+        },
+        "create_weld_joint",
+        [](World& w, Body* a, Body* b, float ax, float ay) {
+            return (a && b) ? w.createWeldJoint(a, b, {ax, ay}) : nullptr;
+        },
+        "create_prismatic_joint",
+        [](World& w, Body* a, Body* b, float ax, float ay, float axisX, float axisY) {
+            return (a && b) ? w.createPrismaticJoint(a, b, {ax, ay}, {axisX, axisY}) : nullptr;
+        },
+        "remove_distance_joint", [](World& w, DistanceJoint* j) { if (j) w.removeDistanceJoint(j); },
+        "remove_revolute_joint", [](World& w, RevoluteJoint* j) { if (j) w.removeRevoluteJoint(j); },
+        "remove_weld_joint", [](World& w, WeldJoint* j) { if (j) w.removeWeldJoint(j); },
+        "remove_prismatic_joint", [](World& w, PrismaticJoint* j) { if (j) w.removePrismaticJoint(j); },
+        // Continuous collision detection (circle movers only, opt-in --
+        // see World.hpp's doc comment for why it defaults off).
+        "enable_ccd", &World::enableCcd);
+
+    lua_.new_usertype<DistanceJoint>("DistanceJoint",
+        "body_a", sol::readonly_property([](const DistanceJoint& j) { return j.a; }),
+        "body_b", sol::readonly_property([](const DistanceJoint& j) { return j.b; }),
+        "length", &DistanceJoint::length);
+    lua_.new_usertype<RevoluteJoint>("RevoluteJoint",
+        "body_a", sol::readonly_property([](const RevoluteJoint& j) { return j.a; }),
+        "body_b", sol::readonly_property([](const RevoluteJoint& j) { return j.b; }));
+    lua_.new_usertype<WeldJoint>("WeldJoint",
+        "body_a", sol::readonly_property([](const WeldJoint& j) { return j.a; }),
+        "body_b", sol::readonly_property([](const WeldJoint& j) { return j.b; }));
+    lua_.new_usertype<PrismaticJoint>("PrismaticJoint",
+        "body_a", sol::readonly_property([](const PrismaticJoint& j) { return j.a; }),
+        "body_b", sol::readonly_property([](const PrismaticJoint& j) { return j.b; }));
 
     lua_["world"] = &world;
 

@@ -297,6 +297,25 @@ void ProjectManagerScreen::drawDocumentation() {
         ImGui::BulletText("Connections survive Play/Stop/Reset Scene along with the rest of the scene.");
     }
 
+    if (ImGui::CollapsingHeader("Physics: Raycasting, Joints, Filtering, CCD")) {
+        ImGui::TextWrapped("Script-only for now (no Inspector/viewport tooling yet) -- see the README's "
+                            "\"Physics engine capabilities\" section for the full technical picture.");
+        ImGui::BulletText("world:raycast_closest(x1,y1,x2,y2,[mask]) / :raycast_all(...) / "
+                           ":query_point(x,y,[mask]) -- cast a ray or test a point against every\n"
+                           "Body/Matter. A ray starting inside a shape never hits it.");
+        ImGui::BulletText("body.collision_category / body.collision_mask (also on Matter) --\n"
+                           "Box2D-style bitmask filtering. Two things collide only if EACH side's\n"
+                           "category is present in the OTHER's mask. Defaults collide with everything.");
+        ImGui::BulletText("world:create_distance_joint / create_revolute_joint / create_weld_joint /\n"
+                           "create_prismatic_joint(a, b, ...) -- RIGID connections (exact distance,\n"
+                           "shared pivot, full weld, sliding axis), unlike create_spring's soft,\n"
+                           "stretchy force. No motors/limits yet -- just the bare constraint.");
+        ImGui::BulletText("world.enable_ccd = true -- opt-in continuous collision detection for\n"
+                           "fast-moving CIRCLES only. Off by default and skipped for OptiMatter\n"
+                           "bodies/particles: it sweeps against every other object with no\n"
+                           "broadphase acceleration, so it's a real per-object cost, not free.");
+    }
+
     if (ImGui::CollapsingHeader("Hierarchy: Create", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::TextWrapped(
             "One Kind dropdown + Create button makes either an ordinary physics shape or a UI "
@@ -421,7 +440,8 @@ void ProjectManagerScreen::drawDocumentation() {
             "(first match), count(), remove_body(body), bodies() (every body, 1-indexed, for ipairs -- "
             "use .radius > 0 to tell a circle from a polygon), create_matter(x, y, radius, MatterKind), "
             "find_matter(name), matter_count(), remove_matter(m), matter() (every Matter particle, "
-            "1-indexed).");
+            "1-indexed). Raycasting, collision filtering, rigid joints, and CCD are also scriptable -- "
+            "see the \"Physics: Raycasting, Joints, Filtering, CCD\" section above.");
         ImGui::TextWrapped(
             "world tracking helpers (names aren't required to be unique, unlike find_body()): "
             "count_by_name(name), count_by_type(BodyType), count_by_matter_kind(MatterKind) (all return "

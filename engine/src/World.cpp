@@ -13,6 +13,13 @@ bool isEffectivelyStatic(const Body& b) {
     return b.type == BodyType::Static || (b.type == BodyType::Dynamic && !b.isAwake);
 }
 
+// Box2D-style category/mask filtering: two things collide only if EACH
+// side's category is present in the OTHER's mask. Symmetric on purpose --
+// either side can veto the pair.
+bool shouldCollide(uint16_t categoryA, uint16_t maskA, uint16_t categoryB, uint16_t maskB) {
+    return (categoryA & maskB) != 0 && (categoryB & maskA) != 0;
+}
+
 uint64_t pairKey(int idA, int idB) {
     if (idA > idB) std::swap(idA, idB);
     return (static_cast<uint64_t>(static_cast<uint32_t>(idA)) << 32) | static_cast<uint32_t>(idB);
@@ -54,6 +61,30 @@ Body* World::createBody(ShapeData shape, Vec2 pos, BodyType type) {
 
 void World::removeBody(Body* body) {
     if (onBodyRemoved) onBodyRemoved(body);
+
+    // Drop any joint touching this body first -- otherwise it's left
+    // holding a dangling Body* the next time a joint solve runs.
+    auto touches = [body](Body* a, Body* b) { return a == body || b == body; };
+    distanceJoints_.erase(std::remove_if(distanceJoints_.begin(), distanceJoints_.end(),
+                                          [&](const std::unique_ptr<DistanceJoint>& p) {
+                                              return touches(p->a, p->b);
+                                          }),
+                          distanceJoints_.end());
+    revoluteJoints_.erase(std::remove_if(revoluteJoints_.begin(), revoluteJoints_.end(),
+                                          [&](const std::unique_ptr<RevoluteJoint>& p) {
+                                              return touches(p->a, p->b);
+                                          }),
+                          revoluteJoints_.end());
+    weldJoints_.erase(
+        std::remove_if(weldJoints_.begin(), weldJoints_.end(),
+                        [&](const std::unique_ptr<WeldJoint>& p) { return touches(p->a, p->b); }),
+        weldJoints_.end());
+    prismaticJoints_.erase(std::remove_if(prismaticJoints_.begin(), prismaticJoints_.end(),
+                                           [&](const std::unique_ptr<PrismaticJoint>& p) {
+                                               return touches(p->a, p->b);
+                                           }),
+                           prismaticJoints_.end());
+
     bodies_.erase(
         std::remove_if(bodies_.begin(), bodies_.end(),
                         [body](const std::unique_ptr<Body>& p) { return p.get() == body; }),
@@ -94,6 +125,86 @@ Matter* World::findMatterByName(const std::string& name) const {
     return nullptr;
 }
 
+DistanceJoint* World::createDistanceJoint(Body* a, Body* b, Vec2 worldAnchorA, Vec2 worldAnchorB) {
+    auto j = std::make_unique<DistanceJoint>();
+    j->a = a;
+    j->b = b;
+    j->localAnchorA = rotate(worldAnchorA - a->position, -a->rotation);
+    j->localAnchorB = rotate(worldAnchorB - b->position, -b->rotation);
+    j->length = (worldAnchorB - worldAnchorA).length();
+    a->wake();
+    b->wake();
+    DistanceJoint* ptr = j.get();
+    distanceJoints_.push_back(std::move(j));
+    return ptr;
+}
+
+RevoluteJoint* World::createRevoluteJoint(Body* a, Body* b, Vec2 worldAnchor) {
+    auto j = std::make_unique<RevoluteJoint>();
+    j->a = a;
+    j->b = b;
+    j->localAnchorA = rotate(worldAnchor - a->position, -a->rotation);
+    j->localAnchorB = rotate(worldAnchor - b->position, -b->rotation);
+    a->wake();
+    b->wake();
+    RevoluteJoint* ptr = j.get();
+    revoluteJoints_.push_back(std::move(j));
+    return ptr;
+}
+
+WeldJoint* World::createWeldJoint(Body* a, Body* b, Vec2 worldAnchor) {
+    auto j = std::make_unique<WeldJoint>();
+    j->a = a;
+    j->b = b;
+    j->localAnchorA = rotate(worldAnchor - a->position, -a->rotation);
+    j->localAnchorB = rotate(worldAnchor - b->position, -b->rotation);
+    j->referenceAngle = b->rotation - a->rotation;
+    a->wake();
+    b->wake();
+    WeldJoint* ptr = j.get();
+    weldJoints_.push_back(std::move(j));
+    return ptr;
+}
+
+PrismaticJoint* World::createPrismaticJoint(Body* a, Body* b, Vec2 worldAnchor, Vec2 worldAxis) {
+    auto j = std::make_unique<PrismaticJoint>();
+    j->a = a;
+    j->b = b;
+    j->localAnchorA = rotate(worldAnchor - a->position, -a->rotation);
+    j->localAnchorB = rotate(worldAnchor - b->position, -b->rotation);
+    j->localAxisA = rotate(worldAxis.normalized(), -a->rotation);
+    j->referenceAngle = b->rotation - a->rotation;
+    a->wake();
+    b->wake();
+    PrismaticJoint* ptr = j.get();
+    prismaticJoints_.push_back(std::move(j));
+    return ptr;
+}
+
+void World::removeDistanceJoint(DistanceJoint* j) {
+    distanceJoints_.erase(
+        std::remove_if(distanceJoints_.begin(), distanceJoints_.end(),
+                        [j](const std::unique_ptr<DistanceJoint>& p) { return p.get() == j; }),
+        distanceJoints_.end());
+}
+void World::removeRevoluteJoint(RevoluteJoint* j) {
+    revoluteJoints_.erase(
+        std::remove_if(revoluteJoints_.begin(), revoluteJoints_.end(),
+                        [j](const std::unique_ptr<RevoluteJoint>& p) { return p.get() == j; }),
+        revoluteJoints_.end());
+}
+void World::removeWeldJoint(WeldJoint* j) {
+    weldJoints_.erase(std::remove_if(weldJoints_.begin(), weldJoints_.end(),
+                                      [j](const std::unique_ptr<WeldJoint>& p) { return p.get() == j; }),
+                       weldJoints_.end());
+}
+void World::removePrismaticJoint(PrismaticJoint* j) {
+    prismaticJoints_.erase(
+        std::remove_if(prismaticJoints_.begin(), prismaticJoints_.end(),
+                        [j](const std::unique_ptr<PrismaticJoint>& p) { return p.get() == j; }),
+        prismaticJoints_.end());
+}
+
 void World::clear() {
     bodies_.clear();
     contacts_.clear();
@@ -106,6 +217,88 @@ void World::clear() {
     prevMatterContacts_.clear();
     prevMatterBodyContacts_.clear();
     nextMatterId_ = 0;
+
+    distanceJoints_.clear();
+    revoluteJoints_.clear();
+    weldJoints_.clear();
+    prismaticJoints_.clear();
+}
+
+bool World::raycastClosest(Vec2 origin, Vec2 target, RaycastResult& outResult, uint16_t mask) const {
+    Vec2 dir = target - origin;
+    bool found = false;
+    float bestFraction = 1.0f;
+
+    for (auto& bp : bodies_) {
+        Body& b = *bp;
+        if ((b.collisionCategory & mask) == 0) continue;
+        collision::RaycastHit hit;
+        bool got = (b.shape.type == ShapeType::Circle) ? collision::raycastCircle(origin, dir, b.position, b.shape.radius, hit)
+                                                        : collision::raycastPolygon(origin, dir, b, hit);
+        if (got && hit.fraction < bestFraction) {
+            bestFraction = hit.fraction;
+            outResult.body = &b;
+            outResult.matter = nullptr;
+            outResult.point = hit.point;
+            outResult.normal = hit.normal;
+            outResult.fraction = hit.fraction;
+            found = true;
+        }
+    }
+    for (auto& mp : matter_) {
+        Matter& m = *mp;
+        if ((m.collisionCategory & mask) == 0) continue;
+        collision::RaycastHit hit;
+        if (collision::raycastCircle(origin, dir, m.position, m.radius, hit) && hit.fraction < bestFraction) {
+            bestFraction = hit.fraction;
+            outResult.body = nullptr;
+            outResult.matter = &m;
+            outResult.point = hit.point;
+            outResult.normal = hit.normal;
+            outResult.fraction = hit.fraction;
+            found = true;
+        }
+    }
+    return found;
+}
+
+std::vector<World::RaycastResult> World::raycastAll(Vec2 origin, Vec2 target, uint16_t mask) const {
+    Vec2 dir = target - origin;
+    std::vector<RaycastResult> results;
+
+    for (auto& bp : bodies_) {
+        Body& b = *bp;
+        if ((b.collisionCategory & mask) == 0) continue;
+        collision::RaycastHit hit;
+        bool got = (b.shape.type == ShapeType::Circle) ? collision::raycastCircle(origin, dir, b.position, b.shape.radius, hit)
+                                                        : collision::raycastPolygon(origin, dir, b, hit);
+        if (got) results.push_back({&b, nullptr, hit.point, hit.normal, hit.fraction});
+    }
+    for (auto& mp : matter_) {
+        Matter& m = *mp;
+        if ((m.collisionCategory & mask) == 0) continue;
+        collision::RaycastHit hit;
+        if (collision::raycastCircle(origin, dir, m.position, m.radius, hit)) {
+            results.push_back({nullptr, &m, hit.point, hit.normal, hit.fraction});
+        }
+    }
+    std::sort(results.begin(), results.end(), [](const RaycastResult& a, const RaycastResult& b) {
+        return a.fraction < b.fraction;
+    });
+    return results;
+}
+
+Body* World::queryPoint(Vec2 point, uint16_t mask) const {
+    // Last-created (topmost) match wins -- same "iterate in reverse, first
+    // hit wins" convention EditorApp::pickBodyAt() already uses for click
+    // selection, so a script's point query matches what clicking there
+    // would select.
+    for (auto it = bodies_.rbegin(); it != bodies_.rend(); ++it) {
+        Body& b = **it;
+        if ((b.collisionCategory & mask) == 0) continue;
+        if (collision::pointInBody(b, point)) return &b;
+    }
+    return nullptr;
 }
 
 int World::computeSubstepCount(float dt) const {
@@ -164,8 +357,11 @@ void World::step(float dt) {
         integrateForces(subDt);
         broadAndNarrowPhase();
         solveVelocities();
+        solveJointVelocities();
         integrateVelocities(subDt);
+        applyCcd(subDt);
         correctPositions();
+        correctJointPositions();
         updateSleepState(subDt);
 
         prevContacts_.clear();
@@ -268,6 +464,8 @@ void World::broadAndNarrowPhase() {
             // their own resting contacts every step.
             if (isEffectivelyStatic(a) && isEffectivelyStatic(b)) return;
 
+            if (!shouldCollide(a.collisionCategory, a.collisionMask, b.collisionCategory, b.collisionMask)) return;
+
             // Looked up before generating the new contact so polygon-polygon
             // SAT can use last step's normal to break an otherwise-ambiguous
             // reference-face tie (see generateContact's doc comment) -- keeps
@@ -320,6 +518,7 @@ void World::broadAndNarrowPhase() {
             Matter& b = *matter_[static_cast<size_t>(j) - bodyCount];
 
             if (!a.isAwake && !b.isAwake) return;
+            if (!shouldCollide(a.collisionCategory, a.collisionMask, b.collisionCategory, b.collisionMask)) return;
 
             MatterContact c;
             if (!collision::generateMatterContact(a, b, c)) return;
@@ -342,6 +541,7 @@ void World::broadAndNarrowPhase() {
             Body& b = iIsMatter ? *bodies_[static_cast<size_t>(j)] : *bodies_[static_cast<size_t>(i)];
 
             if (isEffectivelyStatic(b) && !m.isAwake) return;
+            if (!shouldCollide(m.collisionCategory, m.collisionMask, b.collisionCategory, b.collisionMask)) return;
 
             MatterBodyContact c;
             if (!collision::generateMatterBodyContact(m, b, c)) return;
@@ -642,6 +842,201 @@ void World::solveVelocities() {
     }
 }
 
+void World::solveJointVelocities() {
+    // Same three-phase structure as solveVelocities() above (init geometry/
+    // effective-mass terms once, warm-start, then iterate) -- see Joint.hpp
+    // for what each joint type actually constrains and why Weld/Prismatic
+    // solve their two constraints as independent passes rather than one
+    // coupled system.
+
+    distanceJointConstraintCache_.resize(distanceJoints_.size());
+    for (size_t i = 0; i < distanceJoints_.size(); ++i) {
+        DistanceJoint& j = *distanceJoints_[i];
+        Body& A = *j.a;
+        Body& B = *j.b;
+        DistanceJointConstraint& dc = distanceJointConstraintCache_[i];
+
+        dc.rA = rotate(j.localAnchorA, A.rotation);
+        dc.rB = rotate(j.localAnchorB, B.rotation);
+        Vec2 d = (B.position + dc.rB) - (A.position + dc.rA);
+        float len = d.length();
+        dc.u = (len > 1e-9f) ? d * (1.0f / len) : Vec2(1.0f, 0.0f);
+
+        float crAu = dc.rA.cross(dc.u);
+        float crBu = dc.rB.cross(dc.u);
+        float invMassSum = A.invMass + B.invMass + A.invInertia * crAu * crAu + B.invInertia * crBu * crBu;
+        dc.mass = invMassSum > 0.0f ? 1.0f / invMassSum : 0.0f;
+
+        // Warm start.
+        Vec2 P = dc.u * j.impulse;
+        A.applyImpulse(-1.0f * P, dc.rA);
+        B.applyImpulse(P, dc.rB);
+    }
+    for (int iter = 0; iter < velocityIterations; ++iter) {
+        for (size_t i = 0; i < distanceJoints_.size(); ++i) {
+            DistanceJoint& j = *distanceJoints_[i];
+            DistanceJointConstraint& dc = distanceJointConstraintCache_[i];
+            if (dc.mass <= 0.0f) continue;
+            Body& A = *j.a;
+            Body& B = *j.b;
+
+            Vec2 relVel = (B.velocity + cross(B.angularVelocity, dc.rB)) - (A.velocity + cross(A.angularVelocity, dc.rA));
+            float Cdot = relVel.dot(dc.u);
+            float lambda = -dc.mass * Cdot;
+            j.impulse += lambda;
+
+            Vec2 P = dc.u * lambda;
+            A.applyImpulse(-1.0f * P, dc.rA);
+            B.applyImpulse(P, dc.rB);
+        }
+    }
+
+    revoluteJointConstraintCache_.resize(revoluteJoints_.size());
+    for (size_t i = 0; i < revoluteJoints_.size(); ++i) {
+        RevoluteJoint& j = *revoluteJoints_[i];
+        Body& A = *j.a;
+        Body& B = *j.b;
+        RevoluteJointConstraint& rc = revoluteJointConstraintCache_[i];
+
+        rc.rA = rotate(j.localAnchorA, A.rotation);
+        rc.rB = rotate(j.localAnchorB, B.rotation);
+        rc.k11 = A.invMass + B.invMass + A.invInertia * rc.rA.y * rc.rA.y + B.invInertia * rc.rB.y * rc.rB.y;
+        rc.k12 = -A.invInertia * rc.rA.x * rc.rA.y - B.invInertia * rc.rB.x * rc.rB.y;
+        rc.k22 = A.invMass + B.invMass + A.invInertia * rc.rA.x * rc.rA.x + B.invInertia * rc.rB.x * rc.rB.x;
+
+        A.applyImpulse(-1.0f * j.impulse, rc.rA);
+        B.applyImpulse(j.impulse, rc.rB);
+    }
+    for (int iter = 0; iter < velocityIterations; ++iter) {
+        for (size_t i = 0; i < revoluteJoints_.size(); ++i) {
+            RevoluteJoint& j = *revoluteJoints_[i];
+            RevoluteJointConstraint& rc = revoluteJointConstraintCache_[i];
+            float det = rc.k11 * rc.k22 - rc.k12 * rc.k12;
+            if (std::fabs(det) < 1e-12f) continue;
+            float invDet = 1.0f / det;
+            Body& A = *j.a;
+            Body& B = *j.b;
+
+            Vec2 Cdot = (B.velocity + cross(B.angularVelocity, rc.rB)) - (A.velocity + cross(A.angularVelocity, rc.rA));
+            Vec2 impulse(-invDet * (rc.k22 * Cdot.x - rc.k12 * Cdot.y), -invDet * (-rc.k12 * Cdot.x + rc.k11 * Cdot.y));
+            j.impulse += impulse;
+
+            A.applyImpulse(-1.0f * impulse, rc.rA);
+            B.applyImpulse(impulse, rc.rB);
+        }
+    }
+
+    weldJointConstraintCache_.resize(weldJoints_.size());
+    for (size_t i = 0; i < weldJoints_.size(); ++i) {
+        WeldJoint& j = *weldJoints_[i];
+        Body& A = *j.a;
+        Body& B = *j.b;
+        WeldJointConstraint& wc = weldJointConstraintCache_[i];
+
+        wc.rA = rotate(j.localAnchorA, A.rotation);
+        wc.rB = rotate(j.localAnchorB, B.rotation);
+        wc.k11 = A.invMass + B.invMass + A.invInertia * wc.rA.y * wc.rA.y + B.invInertia * wc.rB.y * wc.rB.y;
+        wc.k12 = -A.invInertia * wc.rA.x * wc.rA.y - B.invInertia * wc.rB.x * wc.rB.y;
+        wc.k22 = A.invMass + B.invMass + A.invInertia * wc.rA.x * wc.rA.x + B.invInertia * wc.rB.x * wc.rB.x;
+        float angleInvMassSum = A.invInertia + B.invInertia;
+        wc.angleMass = angleInvMassSum > 0.0f ? 1.0f / angleInvMassSum : 0.0f;
+
+        A.applyImpulse(-1.0f * j.pointImpulse, wc.rA);
+        B.applyImpulse(j.pointImpulse, wc.rB);
+        A.angularVelocity -= A.invInertia * j.angleImpulse;
+        B.angularVelocity += B.invInertia * j.angleImpulse;
+    }
+    for (int iter = 0; iter < velocityIterations; ++iter) {
+        for (size_t i = 0; i < weldJoints_.size(); ++i) {
+            WeldJoint& j = *weldJoints_[i];
+            WeldJointConstraint& wc = weldJointConstraintCache_[i];
+            Body& A = *j.a;
+            Body& B = *j.b;
+
+            // Angle constraint first (decoupled from the point constraint --
+            // see Joint.hpp).
+            if (wc.angleMass > 0.0f) {
+                float Cdot = B.angularVelocity - A.angularVelocity;
+                float impulse = -wc.angleMass * Cdot;
+                j.angleImpulse += impulse;
+                A.angularVelocity -= A.invInertia * impulse;
+                B.angularVelocity += B.invInertia * impulse;
+            }
+
+            float det = wc.k11 * wc.k22 - wc.k12 * wc.k12;
+            if (std::fabs(det) < 1e-12f) continue;
+            float invDet = 1.0f / det;
+            Vec2 Cdot = (B.velocity + cross(B.angularVelocity, wc.rB)) - (A.velocity + cross(A.angularVelocity, wc.rA));
+            Vec2 impulse(-invDet * (wc.k22 * Cdot.x - wc.k12 * Cdot.y), -invDet * (-wc.k12 * Cdot.x + wc.k11 * Cdot.y));
+            j.pointImpulse += impulse;
+
+            A.applyImpulse(-1.0f * impulse, wc.rA);
+            B.applyImpulse(impulse, wc.rB);
+        }
+    }
+
+    prismaticJointConstraintCache_.resize(prismaticJoints_.size());
+    for (size_t i = 0; i < prismaticJoints_.size(); ++i) {
+        PrismaticJoint& j = *prismaticJoints_[i];
+        Body& A = *j.a;
+        Body& B = *j.b;
+        PrismaticJointConstraint& pc = prismaticJointConstraintCache_[i];
+
+        Vec2 rA = rotate(j.localAnchorA, A.rotation);
+        Vec2 rB = rotate(j.localAnchorB, B.rotation);
+        pc.axis = rotate(j.localAxisA, A.rotation);
+        pc.perp = pc.axis.perp();
+        Vec2 d = (B.position + rB) - (A.position + rA);
+
+        pc.s1 = (d + rA).cross(pc.perp);
+        pc.s2 = rB.cross(pc.perp);
+        float invMassSum = A.invMass + B.invMass + A.invInertia * pc.s1 * pc.s1 + B.invInertia * pc.s2 * pc.s2;
+        pc.perpMass = invMassSum > 0.0f ? 1.0f / invMassSum : 0.0f;
+        float angleInvMassSum = A.invInertia + B.invInertia;
+        pc.angleMass = angleInvMassSum > 0.0f ? 1.0f / angleInvMassSum : 0.0f;
+
+        Vec2 P = pc.perp * j.perpImpulse;
+        float LA = j.perpImpulse * pc.s1;
+        float LB = j.perpImpulse * pc.s2;
+        A.velocity -= P * A.invMass;
+        A.angularVelocity -= A.invInertia * LA;
+        B.velocity += P * B.invMass;
+        B.angularVelocity += B.invInertia * LB;
+        A.angularVelocity -= A.invInertia * j.angleImpulse;
+        B.angularVelocity += B.invInertia * j.angleImpulse;
+    }
+    for (int iter = 0; iter < velocityIterations; ++iter) {
+        for (size_t i = 0; i < prismaticJoints_.size(); ++i) {
+            PrismaticJoint& j = *prismaticJoints_[i];
+            PrismaticJointConstraint& pc = prismaticJointConstraintCache_[i];
+            Body& A = *j.a;
+            Body& B = *j.b;
+
+            if (pc.angleMass > 0.0f) {
+                float Cdot = B.angularVelocity - A.angularVelocity;
+                float impulse = -pc.angleMass * Cdot;
+                j.angleImpulse += impulse;
+                A.angularVelocity -= A.invInertia * impulse;
+                B.angularVelocity += B.invInertia * impulse;
+            }
+
+            if (pc.perpMass > 0.0f) {
+                float Cdot = pc.perp.dot(B.velocity - A.velocity) + pc.s2 * B.angularVelocity - pc.s1 * A.angularVelocity;
+                float impulse = -pc.perpMass * Cdot;
+                j.perpImpulse += impulse;
+
+                Vec2 P = pc.perp * impulse;
+                float LA = impulse * pc.s1;
+                float LB = impulse * pc.s2;
+                A.velocity -= P * A.invMass;
+                A.angularVelocity -= A.invInertia * LA;
+                B.velocity += P * B.invMass;
+                B.angularVelocity += B.invInertia * LB;
+            }
+        }
+    }
+}
+
 void World::integrateVelocities(float dt) {
     for (auto& bp : bodies_) {
         Body& b = *bp;
@@ -655,6 +1050,71 @@ void World::integrateVelocities(float dt) {
         Matter& m = *mp;
         if (!m.isAwake) continue;
         m.position += m.velocity * dt; // no rotation to integrate -- Matter never spins
+    }
+}
+
+void World::applyCcd(float dt) {
+    if (!enableCcd) return;
+
+    // Sweeps `startPos -> pos` (the displacement integrateVelocities() just
+    // applied) against every other Body/Matter, and pulls `pos` back to
+    // just short of the first thing it would have passed clean through
+    // this substep, if any -- see ccdMinMovementFraction's doc comment in
+    // World.hpp for the full picture.
+    auto sweepAndClamp = [this](Vec2& pos, const Vec2& velocity, float radius, uint16_t category, uint16_t mask,
+                                 const Body* selfBody, const Matter* selfMatter, float subDt) {
+        Vec2 disp = velocity * subDt;
+        if (disp.lengthSq() < (radius * ccdMinMovementFraction) * (radius * ccdMinMovementFraction)) return;
+        Vec2 startPos = pos - disp;
+
+        float bestToi = 1.0f;
+        bool hit = false;
+        for (auto& bp : bodies_) {
+            Body& target = *bp;
+            if (&target == selfBody || target.isSensor) continue;
+            if (!shouldCollide(category, mask, target.collisionCategory, target.collisionMask)) continue;
+            collision::RaycastHit rh;
+            bool got = (target.shape.type == ShapeType::Circle)
+                           ? collision::raycastCircle(startPos, disp, target.position, target.shape.radius + radius, rh)
+                           : collision::raycastPolygon(startPos, disp, target, rh, radius);
+            if (got && rh.fraction < bestToi) {
+                bestToi = rh.fraction;
+                hit = true;
+            }
+        }
+        for (auto& mp : matter_) {
+            Matter& target = *mp;
+            if (&target == selfMatter) continue;
+            if (!shouldCollide(category, mask, target.collisionCategory, target.collisionMask)) continue;
+            collision::RaycastHit rh;
+            if (collision::raycastCircle(startPos, disp, target.position, target.radius + radius, rh) &&
+                rh.fraction < bestToi) {
+                bestToi = rh.fraction;
+                hit = true;
+            }
+        }
+
+        if (hit) {
+            // Back off slightly from the exact impact fraction so the next
+            // step's ordinary discrete narrowphase finds a small, sane
+            // overlap to resolve normally, rather than landing exactly on
+            // the boundary where floating-point noise could go either way.
+            pos = startPos + disp * (bestToi * 0.95f);
+        }
+    };
+
+    for (auto& bp : bodies_) {
+        Body& b = *bp;
+        if (b.type != BodyType::Dynamic || !b.isAwake) continue;
+        if (b.shape.type != ShapeType::Circle) continue; // CCD covers circle movers only -- see World.hpp
+        if (b.matterKind == MatterKind::OptiMatter) continue; // exempt, same as forced substeps
+        sweepAndClamp(b.position, b.velocity, b.shape.radius, b.collisionCategory, b.collisionMask, &b, nullptr, dt);
+    }
+    for (auto& mp : matter_) {
+        Matter& m = *mp;
+        if (!m.isAwake) continue;
+        if (m.kind == MatterKind::OptiMatter) continue; // exempt, same as forced substeps
+        sweepAndClamp(m.position, m.velocity, m.radius, m.collisionCategory, m.collisionMask, nullptr, &m, dt);
     }
 }
 
@@ -731,6 +1191,163 @@ void World::correctPositions() {
         Vec2 correction = c.normal * correctionMag;
         m.position -= correction * m.invMass;
         body.position += correction * body.invMass;
+    }
+}
+
+void World::correctJointPositions() {
+    // Same NGS-style direct position nudge as correctPositions() above
+    // (recomputed fresh from current positions every step, nothing carried
+    // over, so it can't compound) -- a joint's error is "how far its
+    // constraint currently is from satisfied," not a contact's penetration,
+    // but the technique (bias-and-cap a correction, split by invMass) is
+    // the same.
+    //
+    // Every one of these ALSO updates rotation, not just position -- unlike
+    // correctPositions()'s contacts (where a translation-only nudge is a
+    // reasonable simplification), a joint's anchor is generally offset from
+    // its body's center, so the same rA/rB moment-arm coupling the velocity
+    // solve above already accounts for applies here too: correcting the
+    // anchor's position without ALSO correcting rotation can't actually
+    // converge to zero error when there's rotational leverage involved, it
+    // just asymptotes at some nonzero residual instead (caught by
+    // tests/joint_test.cpp initially reporting a persistent ~0.22m pin
+    // error that never shrank -- exactly this bug, first shipped without
+    // the rotation update below, then fixed).
+    //
+    // percent = 1.0 (FULL correction), deliberately NOT the 0.2 Baumgarte-
+    // style fraction correctPositions() uses for contacts -- matches
+    // Box2D's actual joint position solver (b2RevoluteJoint::
+    // SolvePositionConstraints and friends both use the full -K^-1*C
+    // impulse, no damping factor). A partial-percent correction here
+    // converges GEOMETRICALLY, but to the wrong (nonzero) fixed point, not
+    // to zero: the rA/rB moment-arm relationship used to derive the
+    // correction is only exact for infinitesimal changes (first-order in
+    // the rotation delta), so repeatedly applying a WEAKENED version of it
+    // doesn't shrink the residual to nothing, it just finds whatever
+    // magnitude makes "correction shrinks C" and "linearization error
+    // regrows C" balance out. Confirmed empirically (a throwaway diagnostic
+    // isolating just this pass, with velocity solving/gravity zeroed out
+    // entirely, converged to ~0.00000 with percent=1.0 vs. plateauing at a
+    // persistent ~0.22-0.27 with percent=0.2) before landing on this fix.
+    const float percent = 1.0f;
+
+    for (auto& jp : distanceJoints_) {
+        DistanceJoint& j = *jp;
+        Body& A = *j.a;
+        Body& B = *j.b;
+
+        Vec2 rA = rotate(j.localAnchorA, A.rotation);
+        Vec2 rB = rotate(j.localAnchorB, B.rotation);
+        Vec2 d = (B.position + rB) - (A.position + rA);
+        float len = d.length();
+        if (len < 1e-9f) continue;
+        Vec2 u = d * (1.0f / len);
+        float C = len - j.length;
+
+        float crAu = rA.cross(u);
+        float crBu = rB.cross(u);
+        float invMassSum = A.invMass + B.invMass + A.invInertia * crAu * crAu + B.invInertia * crBu * crBu;
+        if (invMassSum <= 0.0f) continue;
+        float mass = 1.0f / invMassSum;
+
+        float lambda = -mass * C * percent;
+        Vec2 P = u * lambda;
+        A.position -= P * A.invMass;
+        A.rotation -= A.invInertia * rA.cross(P);
+        B.position += P * B.invMass;
+        B.rotation += B.invInertia * rB.cross(P);
+    }
+
+    for (auto& jp : revoluteJoints_) {
+        RevoluteJoint& j = *jp;
+        Body& A = *j.a;
+        Body& B = *j.b;
+
+        Vec2 rA = rotate(j.localAnchorA, A.rotation);
+        Vec2 rB = rotate(j.localAnchorB, B.rotation);
+        Vec2 C = (B.position + rB) - (A.position + rA);
+
+        float k11 = A.invMass + B.invMass + A.invInertia * rA.y * rA.y + B.invInertia * rB.y * rB.y;
+        float k12 = -A.invInertia * rA.x * rA.y - B.invInertia * rB.x * rB.y;
+        float k22 = A.invMass + B.invMass + A.invInertia * rA.x * rA.x + B.invInertia * rB.x * rB.x;
+        float det = k11 * k22 - k12 * k12;
+        if (std::fabs(det) < 1e-12f) continue;
+        float invDet = 1.0f / det;
+
+        Vec2 P(-invDet * (k22 * C.x - k12 * C.y) * percent, -invDet * (-k12 * C.x + k11 * C.y) * percent);
+        A.position -= P * A.invMass;
+        A.rotation -= A.invInertia * rA.cross(P);
+        B.position += P * B.invMass;
+        B.rotation += B.invInertia * rB.cross(P);
+    }
+
+    for (auto& jp : weldJoints_) {
+        WeldJoint& j = *jp;
+        Body& A = *j.a;
+        Body& B = *j.b;
+
+        float angleInvMassSum = A.invInertia + B.invInertia;
+        if (angleInvMassSum > 0.0f) {
+            float angleMass = 1.0f / angleInvMassSum;
+            float Cangle = (B.rotation - A.rotation) - j.referenceAngle;
+            float impulse = -Cangle * angleMass * percent;
+            A.rotation -= impulse * A.invInertia;
+            B.rotation += impulse * B.invInertia;
+        }
+
+        Vec2 rA = rotate(j.localAnchorA, A.rotation);
+        Vec2 rB = rotate(j.localAnchorB, B.rotation);
+        Vec2 C = (B.position + rB) - (A.position + rA);
+
+        float k11 = A.invMass + B.invMass + A.invInertia * rA.y * rA.y + B.invInertia * rB.y * rB.y;
+        float k12 = -A.invInertia * rA.x * rA.y - B.invInertia * rB.x * rB.y;
+        float k22 = A.invMass + B.invMass + A.invInertia * rA.x * rA.x + B.invInertia * rB.x * rB.x;
+        float det = k11 * k22 - k12 * k12;
+        if (std::fabs(det) < 1e-12f) continue;
+        float invDet = 1.0f / det;
+
+        Vec2 P(-invDet * (k22 * C.x - k12 * C.y) * percent, -invDet * (-k12 * C.x + k11 * C.y) * percent);
+        A.position -= P * A.invMass;
+        A.rotation -= A.invInertia * rA.cross(P);
+        B.position += P * B.invMass;
+        B.rotation += B.invInertia * rB.cross(P);
+    }
+
+    for (auto& jp : prismaticJoints_) {
+        PrismaticJoint& j = *jp;
+        Body& A = *j.a;
+        Body& B = *j.b;
+
+        float angleInvMassSum = A.invInertia + B.invInertia;
+        if (angleInvMassSum > 0.0f) {
+            float angleMass = 1.0f / angleInvMassSum;
+            float Cangle = (B.rotation - A.rotation) - j.referenceAngle;
+            float impulse = -Cangle * angleMass * percent;
+            A.rotation -= impulse * A.invInertia;
+            B.rotation += impulse * B.invInertia;
+        }
+
+        Vec2 rA = rotate(j.localAnchorA, A.rotation);
+        Vec2 rB = rotate(j.localAnchorB, B.rotation);
+        Vec2 axis = rotate(j.localAxisA, A.rotation);
+        Vec2 perp = axis.perp();
+        Vec2 d = (B.position + rB) - (A.position + rA);
+
+        float s1 = (d + rA).cross(perp);
+        float s2 = rB.cross(perp);
+        float invMassSum = A.invMass + B.invMass + A.invInertia * s1 * s1 + B.invInertia * s2 * s2;
+        if (invMassSum <= 0.0f) continue;
+        float perpMass = 1.0f / invMassSum;
+
+        float Cperp = perp.dot(d);
+        float impulse = -Cperp * perpMass * percent;
+        Vec2 P = perp * impulse;
+        float LA = impulse * s1;
+        float LB = impulse * s2;
+        A.position -= P * A.invMass;
+        A.rotation -= LA * A.invInertia;
+        B.position += P * B.invMass;
+        B.rotation += LB * B.invInertia;
     }
 }
 

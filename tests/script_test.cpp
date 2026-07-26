@@ -281,6 +281,70 @@ int main() {
     check(findMatterByKindScript.valid() && findMatterByKindScript.get<int>() == 1,
           "world:find_matter_by_kind() returns a table with every matching particle");
 
+    // Collision filtering: category/mask read/write from Lua.
+    sol::protected_function_result filterScript = engine.lua().script(
+        "local p = world:find_body('pentagon_for_density_test') "
+        "p.collision_category = 2 "
+        "p.collision_mask = 4 "
+        "return p.collision_category, p.collision_mask");
+    check(filterScript.valid(), "Body.collision_category/collision_mask run without error");
+    if (filterScript.valid()) {
+        int cat = filterScript.get<int>(0);
+        int mask = filterScript.get<int>(1);
+        check(cat == 2 && mask == 4, "Body.collision_category/collision_mask round-trip through Lua");
+    }
+
+    // world:raycast_closest()/raycast_all()/query_point().
+    world.gravity = {0.0f, 0.0f};
+    world.createCircle({5.0f, 20.0f}, 1.0f, BodyType::Static)->name = "ray_target";
+    sol::protected_function_result raycastScript = engine.lua().script(
+        "local hit = world:raycast_closest(0, 20, 10, 20) "
+        "if hit == nil then return false end "
+        "return hit.body ~= nil and hit.body.name == 'ray_target' and hit.fraction > 0 and hit.fraction < 1");
+    check(raycastScript.valid() && raycastScript.get<bool>(),
+          "world:raycast_closest() finds a body and returns a hit table with body/fraction");
+
+    sol::protected_function_result raycastMissScript = engine.lua().script("return world:raycast_closest(0, 0, 1, 0)");
+    check(raycastMissScript.valid() && raycastMissScript.get<sol::object>().get_type() == sol::type::lua_nil,
+          "world:raycast_closest() returns nil (not an error) when nothing is hit");
+
+    sol::protected_function_result raycastAllScript =
+        engine.lua().script("return #world:raycast_all(0, 20, 10, 20)");
+    check(raycastAllScript.valid() && raycastAllScript.get<int>() == 1,
+          "world:raycast_all() returns a table of every hit along the ray");
+
+    sol::protected_function_result queryPointScript = engine.lua().script(
+        "local b = world:query_point(5, 20) "
+        "return b ~= nil and b.name == 'ray_target'");
+    check(queryPointScript.valid() && queryPointScript.get<bool>(),
+          "world:query_point() finds the body containing that point");
+
+    // Rigid joints: create_distance_joint()/create_revolute_joint()/etc.
+    world.createCircle({0.0f, 30.0f}, 0.5f, BodyType::Static)->name = "joint_anchor";
+    world.createCircle({5.0f, 30.0f}, 0.5f, BodyType::Dynamic)->name = "joint_bob";
+    sol::protected_function_result distanceJointScript = engine.lua().script(
+        "local a = world:find_body('joint_anchor') "
+        "local b = world:find_body('joint_bob') "
+        "local j = world:create_distance_joint(a, b, a.position.x, a.position.y, b.position.x, b.position.y) "
+        "return j ~= nil and j.length > 4.9 and j.length < 5.1 and j.body_a == a and j.body_b == b");
+    check(distanceJointScript.valid() && distanceJointScript.get<bool>(),
+          "world:create_distance_joint() creates a joint with the right length/body_a/body_b from Lua");
+
+    sol::protected_function_result revoluteJointScript = engine.lua().script(
+        "local a = world:find_body('joint_anchor') "
+        "local b = world:find_body('joint_bob') "
+        "local j = world:create_revolute_joint(a, b, a.position.x, a.position.y) "
+        "return j ~= nil");
+    check(revoluteJointScript.valid() && revoluteJointScript.get<bool>(),
+          "world:create_revolute_joint() runs without error and returns a handle");
+
+    // enable_ccd: settable from Lua.
+    sol::protected_function_result ccdScript = engine.lua().script(
+        "world.enable_ccd = true "
+        "return world.enable_ccd");
+    check(ccdScript.valid() && ccdScript.get<bool>(), "world.enable_ccd is settable/readable from Lua");
+    world.enableCcd = false; // don't leak into later checks in this test
+
     if (g_failures == 0) {
         std::printf("\nAll script tests passed.\n");
         return EXIT_SUCCESS;

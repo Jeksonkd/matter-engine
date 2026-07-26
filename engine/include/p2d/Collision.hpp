@@ -107,5 +107,42 @@ bool generateContact(Body& a, Body& b, Contact& out, const Vec2* prevNormalHint 
 bool generateMatterContact(Matter& a, Matter& b, MatterContact& out);
 bool generateMatterBodyContact(Matter& matter, Body& body, MatterBodyContact& out);
 
+// A single raycast hit: `fraction` is 0..1 along the ray segment (`origin`
+// to `origin + dir`) that was cast, `point`/`normal` are in world space,
+// and `normal` always faces back out of the surface (opposing the ray).
+struct RaycastHit {
+    Vec2 point;
+    Vec2 normal;
+    float fraction = 0.0f;
+};
+
+// Pure geometry, no Body dependency -- `dir` is the FULL ray segment (not
+// normalized; `origin + dir` is the ray's far end), matching how World's
+// raycastClosest()/raycastAll() take a `target` point and compute
+// `dir = target - origin` once. A ray whose origin starts inside the circle
+// never reports a hit (same convention as Box2D's b2CircleShape::RayCast) --
+// a raycast models "the first surface this ray reaches from outside it,"
+// not an already-overlapping query.
+bool raycastCircle(Vec2 origin, Vec2 dir, Vec2 center, float radius, RaycastHit& out);
+
+// Polygon raycast via the standard slab-clipping algorithm (successively
+// narrowing the accepted [lower, upper] fraction range against each edge's
+// half-plane) -- needs the Body for its shape/transform, unlike the raw
+// circle-vs-circle geometry helpers above. `inflateRadius` (default 0, an
+// ordinary point raycast) treats the polygon as expanded outward by that
+// amount along every face -- exact for face contacts, a reasonable
+// approximation right at corners (still sharp rather than rounded) --
+// which is what lets World's swept-circle CCD reuse this same function for
+// "does a moving circle's CENTER path cross this polygon's surface,
+// expanded by the circle's own radius" instead of needing a separate
+// circle-vs-polygon sweep test.
+bool raycastPolygon(Vec2 origin, Vec2 dir, const Body& polyBody, RaycastHit& out, float inflateRadius = 0.0f);
+
+// True if `point` (world space) falls inside `body`'s current shape --
+// shared by World::queryPoint() and anything else that wants a plain
+// point-in-shape test (e.g. an editor's own click-to-select, which
+// currently duplicates this logic itself -- see EditorApp::pickBodyAt()).
+bool pointInBody(const Body& body, Vec2 point);
+
 } // namespace collision
 } // namespace p2d

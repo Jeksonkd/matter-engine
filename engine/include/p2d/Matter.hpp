@@ -84,6 +84,12 @@ public:
 
     MatterKind kind = MatterKind::Matter;
 
+    // Collision filtering -- same scheme and defaults as Body::collisionCategory/
+    // collisionMask (see its doc comment), checked identically for
+    // Matter-Matter and Matter-Body pairs in World::broadAndNarrowPhase().
+    uint16_t collisionCategory = 0x0001;
+    uint16_t collisionMask = 0xFFFF;
+
     // Viewport display color (RGB, 0-255) -- same fixed-once-set convention
     // as Body::colorR/G/B.
     uint8_t colorR = 220, colorG = 140, colorB = 60;
