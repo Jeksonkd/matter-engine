@@ -296,21 +296,12 @@ built with [SFML](https://www.sfml-dev.org/) + [Dear ImGui](https://github.com/o
   rendered in a distinct color so they're visually easy to pick out from
   scripts at a glance (Dear ImGui has no italic font loaded in this build,
   so a color tint is the practical stand-in for that).
-- **Matter — a particle, not a rigidbody**: `p2d::Matter` is a genuinely
-  separate simulation primitive from `p2d::Body`, not a cheaper rigidbody
-  preset — see "Matter: a particle genuinely separate from Body" below for
-  the full design and why. Script-only for now (`world:create_matter(x, y,
-  radius, MatterKind.Matter)`); it renders in the viewport but has no
-  Inspector/Spawn-tool/persistence support yet.
-- **`Body::matterKind` — the same Matter/OptiMatter fidelity dial, on full
-  rigidbodies**: an ordinary `Body` (any shape, rotation, scripts, UI
-  Elements — everything Body already does) can opt into the same
-- **Matter — a particle, not a rigidbody**: `p2d::Matter` is a genuinely
-  separate simulation primitive from `p2d::Body`, not a cheaper rigidbody
-  preset — see "Matter: a particle genuinely separate from Body" below for
-  the full design and why. Script-only for now (`world:create_matter(x, y,
-  radius, MatterKind.Matter)`); it renders in the viewport but has no
-  Inspector/Spawn-tool/persistence support yet.
+- **Matter — its own object type, not a rigidbody**: `p2d::Matter` is a
+  genuinely separate simulation primitive from `p2d::Body`, not a cheaper
+  rigidbody preset — see "Matter: an object type genuinely separate from
+  Body" below for the full design and why. Script-only for now
+  (`world:create_matter(x, y, radius, MatterKind.Matter)`); it renders in
+  the viewport but has no Inspector/Spawn-tool/persistence support yet.
 - **`Body::matterKind` — the same Matter/OptiMatter fidelity dial, on full
   rigidbodies**: an ordinary `Body` (any shape, rotation, scripts, UI
   Elements — everything Body already does) can opt into the same
@@ -326,7 +317,7 @@ built with [SFML](https://www.sfml-dev.org/) + [Dear ImGui](https://github.com/o
   *after* changing it, not anything already in the scene (change an
   existing body's own kind from its Inspector instead).
 - **Raycasting and point queries**: `World::raycastClosest()`/`raycastAll()`
-  cast a ray against every Body and Matter particle (closest hit, or every
+  cast a ray against every Body and Matter object (closest hit, or every
   hit sorted nearest-first); `World::queryPoint()` finds whatever's at a
   point. All three respect collision filtering (below) via an optional
   `mask` parameter. See "Physics engine capabilities" below.
@@ -347,78 +338,21 @@ built with [SFML](https://www.sfml-dev.org/) + [Dear ImGui](https://github.com/o
 
 ## Handling massive object counts
 
-This came up directly: "a crash at 10,000 simple shapes usually indicates a
-memory leak or an unoptimized broad-phase pass" is good general advice, and
-worth checking against this specific engine rather than taking on faith. So:
-
-**No crash, no leak, confirmed directly.** Stress-tested at 10,000 and
+**No crash, no leak.** Stress-tested at 10,000 bodies and at
 60,000-bodies-created-over-a-session (continuously spawning and destroying
 around a steady population of 500, simulating long-running churn): no crash
-at any scale tried, and RSS memory stayed flat after an initial ramp-up even
+at any scale tried, and RSS memory stays flat after an initial ramp-up even
 after 60,000 total creations — `World::createBody`/`removeBody` don't leak.
 Object pooling (reusing body slots instead of allocating/freeing each one)
 would still shave allocator overhead in high-churn scenes, but isn't needed
 for correctness here — there's no leak to fix.
 
-**The broadphase *did* have real problems, found by actually stress-testing
-rather than assuming.** This engine used sweep-and-prune (SAP) before this
-investigation. SAP is great for spread-out scenes, but its cost is driven by
-how many bodies share an x-range at any point in the sweep — and a
-genuinely dense cluster (many bodies resting in a small area, exactly what
-"drop N bodies and let them settle" produces) makes that active-set large
-regardless of how good the rest of the algorithm is. A 10,000-body dense
-pile showed per-step cost climbing without bound (0.05ms → 100+ms/step)
-over 20+ simulated seconds.
-
-Replacing it with a spatial hash grid (the classic answer, and what you'd
-call a quadtree/octree in other engines — a uniform grid is the 2D-friendly
-version of the same idea) fixed it *in principle*, but getting there took
-two more rounds of "implement, stress-test, find a real bug, fix it":
-
-1. First attempt re-picked the grid's cell size fresh every step with no
-   hysteresis. A slightly different cell size means the same world position
-   hashes to a different cell key, so the map's key set grew without bound
-   as bodies spawned/died — this alone took a 40-second bacteria simulation
-   from 0.3s to over 1 minute.
-2. Fixed the cell-size churn, but the pair-candidate deduplication used a
-   `std::unordered_set` of already-seen pairs — which heap-allocates a node
-   per candidate pair, every step. Profiling showed this dominating.
-3. Rewrote the grid to need no dedup set at all (single-cell-per-body
-   insertion + a "half neighborhood" trick so every pair is found exactly
-   once by construction), and to only clear bucket *contents* between steps
-   rather than fully tearing down the map — reusing capacity instead of
-   reallocating it. This is when a **10,000-body pile appeared to still be
-   tunneling through the floor** in a stress test.
-
-That last one turned out not to be a bug at all: the test floor was 100m
-wide with no side walls, and 10,000 jostling bodies pushed some of their
-neighbors past its finite edges — they were falling through the *gap*
-beyond the floor, exactly like anything would. Rebuilding the same test
-with side walls showed flat, stable per-step cost with no cap on how long
-it ran. Worth including here because it's a good example of the *other*
-failure mode in this kind of investigation: not every "it's still broken"
-result is real, and a stress test's own setup needs the same scrutiny as
-the code it's testing.
-
-That fix (reuse bucket contents, keep the map's keys stable across steps)
-then caused a *fourth* bug: keeping keys around indefinitely means a body
-wandering to new cells over a long run (not settling — the bacteria demo's
-cells reproduce and move around for 40 simulated seconds at a roughly
-constant population) leaves the map's key set growing to cover every cell
-ever visited, even though the *current* occupancy stays small — and both
-pair-generation passes iterate every map entry regardless of whether its
-bucket is still occupied. This is what actually caused the bacteria test's
-timing regression during this work (0.5s → 14s), caught by simply running
-the existing test suite after each change rather than only the scenario
-being optimized for. Fixed by pruning empty buckets at the end of each
-step, bounding the map to currently-active cells while still reusing
-capacity for cells that stay in use.
-
-`tests/broadphase_test.cpp` now covers all of this: grid/brute-force
-equivalence (including a tiny-cell-size stress configuration), a contained
-dense-cluster scenario checked for flat (not growing) per-step cost across
-two time windows, and a small-population-that-keeps-moving scenario
-checked the same way (the one that would have caught bug #4 immediately).
+**Broadphase**: a spatial hash grid (the 2D-friendly equivalent of a
+quadtree/octree) instead of an O(n²) all-pairs scan, verified to find
+exactly the same candidate pairs as brute force (`tests/broadphase_test.cpp`).
+Per-step cost stays flat rather than growing, both for a large contained
+dense cluster and for a smaller population that keeps moving around over a
+long run.
 
 **Sleeping** (see Features above) is implemented and works, but a very
 deep, densely-packed pile can take a long time to fully quiesce — low-level
@@ -493,7 +427,7 @@ was the actual fix, verified with a throwaway diagnostic before landing in
 `correctJointPositions()`.
 
 **Continuous collision detection** (`World::enableCcd`, `applyCcd()`): after
-`integrateVelocities()` moves a Dynamic circle Body or a Matter particle, if
+`integrateVelocities()` moves a Dynamic circle Body or a Matter object, if
 it moved more than `ccdMinMovementFraction * radius` this substep, its
 straight-line path is swept (the same `raycastCircle`/`raycastPolygon`
 above, with the mover's own radius added to the target's — or, for
@@ -529,7 +463,7 @@ with the same testing approach that caught the two real bugs above. Worth
 doing as a *separate*, carefully-tested pass if body counts genuinely
 demand it — not bundled into this one under time pressure.
 
-## Matter: a particle genuinely separate from Body
+## Matter: an object type genuinely separate from Body
 
 This started as a per-object performance dial: a `MatterKind` flag directly
 on `Body`, so a single rigidbody could opt into cheaper treatment (fewer
@@ -539,8 +473,9 @@ rigidbody, the honest answer was yes — it was still a full `Body` underneath
 the whole time, just with a flag. Making it *genuinely* separate meant
 picking one of two real designs: keep today's exact rotating-rigidbody
 physics and just wrap it in its own class (cosmetic — the simulation
-wouldn't actually differ), or give it real particle semantics: no rotation,
-no torque, no moment of inertia at all. The second one is what got built.
+wouldn't actually differ), or give it real point-mass semantics: no
+rotation, no torque, no moment of inertia at all. The second one is what
+got built.
 
 **`p2d::Matter`** is a point-mass: `position`, `velocity`, `mass` — nothing
 else describing orientation, because there's no rotation to have one.
@@ -556,23 +491,23 @@ differences from Body rather than bugs:
   (`circleVsCircleRaw`/`circleVsPolygonRaw` in `Collision.cpp`, refactored
   to take a bare position+radius instead of a `Body` so both share it) —
   not a parallel reimplementation.
-- **Always simulated.** No Static/Kinematic equivalent — a particle that
+- **Always simulated.** No Static/Kinematic equivalent — an object that
   never moves has little reason to exist. Every `Matter` behaves like an
   ordinary Dynamic `Body` would.
 - **No scripts, UI Elements, or spring joints (yet).** `Body`'s scripting/
   UI-Element/joint machinery is all keyed by `Body*`; extending it to
   `Matter` too is a reasonable future step, just not this one.
 
-**It still collides with everything.** A `Matter` particle generates real
+**It still collides with everything.** A `Matter` object generates real
 contacts against other `Matter` *and* against ordinary `Body` rigidbodies
 (walls, crates, ...) through `World`'s existing broadphase — one combined
 AABB list (bodies then matter) through a single `SpatialHashGrid` pass finds
 Body-Body, Matter-Matter, and Matter-Body pairs together, rather than three
 separate grid builds. The solver math genuinely differs by pair kind: a
 Matter-Matter contact has no moment-arm term on *either* side (neither
-rotates, so a contact point's velocity IS just the particle's velocity); a
+rotates, so a contact point's velocity IS just the object's velocity); a
 Matter-Body contact keeps the Body's usual `r × impulse` rotational response
-but drops it entirely for the Matter side — which means **a Matter particle
+but drops it entirely for the Matter side — which means **a Matter object
 can still torque a Body it hits off-center, it just never spins itself in
 response** (`tests/matter_test.cpp` fires one at a box's edge and checks the
 box's `angularVelocity` becomes nonzero from exactly that).
@@ -582,7 +517,7 @@ never forces extra substeps (`World::computeSubstepCount()`), always sleeps
 at least as eagerly as `optiMatterLinearSleepThreshold`/
 `optiMatterTimeToSleep`, and gets the larger `optiMatterMaxLinearCorrection`
 cap on any contact it's part of — all verified in `tests/matter_test.cpp`
-(an OptiMatter particle sleeps sooner than an identically-dropped Matter
+(an OptiMatter object sleeps sooner than an identically-dropped Matter
 one; an OptiMatter bullet tunnels through a wall that catches an otherwise-
 identical Matter one, since it doesn't force the substeps that would've
 caught it). `MatterKind::Matter` is `Matter`'s own default and pulls the
@@ -591,7 +526,7 @@ with `Body::matterKind`.
 
 ### `Body::matterKind` — the same fidelity dial, back on Body too
 
-Once `Matter` existed as a real particle, the next ask was for something
+Once `Matter` existed as its own real object type, the next ask was for something
 that behaves like Matter/OptiMatter but keeps *every* rigidbody capability
 — rotation, arbitrary shapes, scripting, UI-Element hosting. Duplicating
 all of that a second time inside `Matter` would mean two parallel,
@@ -616,8 +551,8 @@ persistence) with zero duplicate code.
   substeps than a Rigidbody moving at the same speed would — genuinely
   higher fidelity, at real extra cost, matching the original "Matter will
   be realistic and optimized" framing.
-- `MatterKind::OptiMatter`: same three effects as an OptiMatter `Matter`
-  particle — exempt from forced extra substeps, looser sleep thresholds
+- `MatterKind::OptiMatter`: same three effects as an OptiMatter-kind
+  `Matter` object — exempt from forced extra substeps, looser sleep thresholds
   (now including an angular one, `optiMatterAngularSleepThreshold`, since a
   Body — unlike Matter — actually has angular velocity to check), and the
   larger `optiMatterMaxLinearCorrection` cap.
@@ -638,7 +573,7 @@ resolves a visibly larger step than Matter; and a Matter body needs
 strictly more substeps (checked directly via `World::onPreSubstep`'s
 per-substep callback count) than an identically-moving Rigidbody.
 
-`p2d::Matter` (the standalone particle class above) is unaffected by any of
+`p2d::Matter` (the standalone object type above) is unaffected by any of
 this and remains the lighter-weight option when full rigidbody features
 genuinely aren't needed — `Body::matterKind` is for when they are.
 
@@ -1242,10 +1177,10 @@ Bound API surface:
 |---|---|
 | `Vec2` | `Vec2.new(x, y)`, `.x`, `.y`, `:length()`, `:normalized()`, `:dot(v)`, `+`, `-`, `*` |
 | `Body` | `.position`, `.rotation`, `.velocity`, `.angular_velocity`, `.restitution`, `.friction`, `.density` (settable, recomputes mass), `.mass` (read), `.inertia` (read), `.linear_damping`, `.angular_damping`, `.gravity_scale`, `.fixed_rotation`, `.is_sensor`, `.is_awake` (read), `.name`, `.type` (settable -- recomputes mass immediately, e.g. `Static` \| `Kinematic` both go to mass 0), `.matter_kind` (`MatterKind.Rigidbody`/`.Matter`/`.OptiMatter` -- solver fidelity dial, see "`Body::matterKind`" above; doesn't remove/change any other field here), `.collision_category`/`.collision_mask` (Box2D-style filtering, see "Physics engine capabilities" above), `.radius` (0 for a non-circle shape; settable ONLY while already a circle -- silently ignored otherwise, use `:set_circle()` below to convert), `.color_r`/`.color_g`/`.color_b` (0-255, settable individually), `.texture_path` (a plain string -- empty means no texture; Inspector-editable via Appearance's "Texture" field, drag-and-drop included, see Features above), `.ui_text` (a plain string -- UI Element templates read this for their label; Inspector-editable via the "UI Text" field), `.ui_value` (a checkbox's checked state or a slider's current value; read AND written by those templates every frame, Inspector-editable via "UI Value"), `.ui_min`/`.ui_max` (a slider's range, Inspector-editable via "UI Min / Max"), `.ui_hide_text` (drops the label -- Inspector-editable via "Hide Text", not offered for the Text kind), `:set_color(r,g,b)` (all three channels at once, 0-255), `:set_circle(radius)`/`:set_box(hw,hh)`/`:set_polygon(sides,circumradius)` (rebuild this body's shape from scratch -- unlike `.radius`, these convert BETWEEN shape kinds too, e.g. a box into a circle -- and recompute mass/inertia), `:apply_force(v)`, `:apply_force_at_point(v, worldPoint)`, `:apply_impulse(v)`, `:apply_torque(t)`, `:wake()`, `:set_velocity(x,y)`, `:set_position(x,y)` |
-| `World` (global `world`) | `.gravity`, `.enable_ccd` (settable -- see "Physics engine capabilities" above; off by default), `:create_circle(x,y,radius,BodyType)`, `:create_box(x,y,hw,hh,BodyType)`, `:create_polygon(x,y,sides,circumradius,BodyType)` (any regular N-gon -- triangle, pentagon, hexagon, ... in one function), `:find_body(name)` (first match only), `:count()` (total body count), `:remove_body(body)`, `:bodies()` (every body as a 1-indexed table, for `ipairs` -- use `.radius > 0` to tell a circle from a polygon, since `.radius` reads 0 for non-circle shapes), `:create_matter(x,y,radius,MatterKind)`, `:find_matter(name)`, `:matter_count()`, `:remove_matter(m)`, `:matter()` (every Matter particle, 1-indexed, for `ipairs`) — plus tracking helpers for when names aren't unique or you just want a headcount: `:count_by_name(name)`/`:count_by_type(BodyType)`/`:count_by_matter_kind(MatterKind)` (all return an int) and `:find_bodies_by_name(name)`/`:find_bodies_by_type(BodyType)`/`:find_bodies_by_matter_kind(MatterKind)` (all return a 1-indexed table of every match, same convention as `:bodies()`), plus the Matter-particle equivalents `:count_matter_by_kind(MatterKind)`/`:find_matter_by_kind(MatterKind)`. Queries: `:raycast_closest(x1,y1,x2,y2,[mask])` (nil, or a table with `body`/`matter`/`x`/`y`/`nx`/`ny`/`fraction`), `:raycast_all(x1,y1,x2,y2,[mask])` (same table shape, 1-indexed, nearest-first), `:query_point(x,y,[mask])` (the topmost `Body` there, or nil). Joints: `:create_distance_joint(a,b,ax,ay,bx,by)`, `:create_revolute_joint(a,b,ax,ay)`, `:create_weld_joint(a,b,ax,ay)`, `:create_prismatic_joint(a,b,ax,ay,axisX,axisY)` (world-space anchors; each returns a joint handle, see below), and the matching `:remove_distance_joint(j)`/`:remove_revolute_joint(j)`/`:remove_weld_joint(j)`/`:remove_prismatic_joint(j)` |
+| `World` (global `world`) | `.gravity`, `.enable_ccd` (settable -- see "Physics engine capabilities" above; off by default), `:create_circle(x,y,radius,BodyType)`, `:create_box(x,y,hw,hh,BodyType)`, `:create_polygon(x,y,sides,circumradius,BodyType)` (any regular N-gon -- triangle, pentagon, hexagon, ... in one function), `:find_body(name)` (first match only), `:count()` (total body count), `:remove_body(body)`, `:bodies()` (every body as a 1-indexed table, for `ipairs` -- use `.radius > 0` to tell a circle from a polygon, since `.radius` reads 0 for non-circle shapes), `:create_matter(x,y,radius,MatterKind)`, `:find_matter(name)`, `:matter_count()`, `:remove_matter(m)`, `:matter()` (every Matter object, 1-indexed, for `ipairs`) — plus tracking helpers for when names aren't unique or you just want a headcount: `:count_by_name(name)`/`:count_by_type(BodyType)`/`:count_by_matter_kind(MatterKind)` (all return an int) and `:find_bodies_by_name(name)`/`:find_bodies_by_type(BodyType)`/`:find_bodies_by_matter_kind(MatterKind)` (all return a 1-indexed table of every match, same convention as `:bodies()`), plus the Matter-object equivalents `:count_matter_by_kind(MatterKind)`/`:find_matter_by_kind(MatterKind)`. Queries: `:raycast_closest(x1,y1,x2,y2,[mask])` (nil, or a table with `body`/`matter`/`x`/`y`/`nx`/`ny`/`fraction`), `:raycast_all(x1,y1,x2,y2,[mask])` (same table shape, 1-indexed, nearest-first), `:query_point(x,y,[mask])` (the topmost `Body` there, or nil). Joints: `:create_distance_joint(a,b,ax,ay,bx,by)`, `:create_revolute_joint(a,b,ax,ay)`, `:create_weld_joint(a,b,ax,ay)`, `:create_prismatic_joint(a,b,ax,ay,axisX,axisY)` (world-space anchors; each returns a joint handle, see below), and the matching `:remove_distance_joint(j)`/`:remove_revolute_joint(j)`/`:remove_weld_joint(j)`/`:remove_prismatic_joint(j)` |
 | `BodyType` | `.Static`, `.Kinematic`, `.Dynamic` |
-| `Matter` | a point-mass particle, NOT a rigidbody -- see Features above (Matter section) for what's genuinely different about it. `.position`, `.velocity`, `.restitution`, `.friction`, `.linear_damping`, `.gravity_scale`, `.name`, `.matter_kind` (`MatterKind.Matter`/`MatterKind.OptiMatter`), `.collision_category`/`.collision_mask` (Box2D-style filtering, see "Physics engine capabilities" above), `.radius` (settable -- recomputes mass, like `.density` below), `.texture_path`, `.color_r`/`.color_g`/`.color_b` (0-255, settable individually), `.density` (settable, recomputes mass), `.mass` (read), `.is_awake` (read), `:set_color(r,g,b)` (all three channels at once), `:apply_force(v)`, `:apply_impulse(v)`, `:wake()`, `:set_velocity(x,y)`, `:set_position(x,y)` -- deliberately no `.rotation`/`.angular_velocity`/`.type`/`:apply_torque`, none of which mean anything for something that never rotates |
-| `MatterKind` | `.Rigidbody`, `.Matter`, `.OptiMatter` -- see Features above (Matter section); `.Rigidbody` only makes sense on `Body` (a `Matter` particle defaults to `.Matter` and has no reason to be `.Rigidbody`) |
+| `Matter` | a point-mass object, NOT a rigidbody -- see Features above (Matter section) for what's genuinely different about it. `.position`, `.velocity`, `.restitution`, `.friction`, `.linear_damping`, `.gravity_scale`, `.name`, `.matter_kind` (`MatterKind.Matter`/`MatterKind.OptiMatter`), `.collision_category`/`.collision_mask` (Box2D-style filtering, see "Physics engine capabilities" above), `.radius` (settable -- recomputes mass, like `.density` below), `.texture_path`, `.color_r`/`.color_g`/`.color_b` (0-255, settable individually), `.density` (settable, recomputes mass), `.mass` (read), `.is_awake` (read), `:set_color(r,g,b)` (all three channels at once), `:apply_force(v)`, `:apply_impulse(v)`, `:wake()`, `:set_velocity(x,y)`, `:set_position(x,y)` -- deliberately no `.rotation`/`.angular_velocity`/`.type`/`:apply_torque`, none of which mean anything for something that never rotates |
+| `MatterKind` | `.Rigidbody`, `.Matter`, `.OptiMatter` -- see Features above (Matter section); `.Rigidbody` only makes sense on `Body` (a `Matter` object defaults to `.Matter` and has no reason to be `.Rigidbody`) |
 | `DistanceJoint`/`RevoluteJoint`/`WeldJoint`/`PrismaticJoint` | rigid, bilateral constraints -- see "Physics engine capabilities" above for what each one constrains. All four: `.body_a`/`.body_b` (read). `DistanceJoint` additionally: `.length` (settable -- the rope/rod's rest length). Created via `world:create_*_joint(...)` (above), removed via `world:remove_*_joint(j)` -- also cleaned up automatically if either body is removed with `world:remove_body()`. |
 | `SCRIPT_PATH` | the currently-running script's own path — pass it to `attach_script` to make a spawned body self-replicate with the same script |
 | `attach_script(body, path)` | attaches/reloads a script on a body spawned from within another script |
@@ -1415,7 +1350,7 @@ wiring it into the UI.
   produces one point, so there's nothing ambiguous to match against.
 - `p2d::Matter` (see Features above) is script-only for now: no Inspector
   editing, no Spawn tool placement, no Hierarchy listing, no selection in
-  the viewport, and no scene persistence (a Matter particle created by a
+  the viewport, and no scene persistence (a Matter object created by a
   script vanishes on reload, unlike a Body). It does render, and fully
   participates in physics (collides with both Matter and Body, sleeps,
   respects its own MatterKind dial) — the gap is purely in editor tooling

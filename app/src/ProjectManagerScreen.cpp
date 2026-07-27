@@ -306,7 +306,7 @@ void ProjectManagerScreen::drawDocumentation() {
                            "stretchy force. No motors/limits yet -- just the bare constraint.");
         ImGui::BulletText("world.enable_ccd = true -- opt-in continuous collision detection for\n"
                            "fast-moving CIRCLES only. Off by default and skipped for OptiMatter\n"
-                           "bodies/particles: it sweeps against every other object with no\n"
+                           "Bodies/Matter objects: it sweeps against every other object with no\n"
                            "broadphase acceleration, so it's a real per-object cost, not free.");
     }
 
@@ -421,7 +421,7 @@ void ProjectManagerScreen::drawDocumentation() {
             "worldPoint), apply_impulse(Vec2), apply_torque(t), wake().");
         ImGui::Separator();
         ImGui::TextWrapped(
-            "Matter (a point-mass particle, NOT a rigidbody -- no rotation/torque/inertia at all): "
+            "Matter (a point-mass object type, NOT a rigidbody -- no rotation/torque/inertia at all): "
             "position, velocity, restitution, friction, linear_damping, gravity_scale, name, matter_kind "
             "(MatterKind.Matter/.OptiMatter only), radius (settable, recomputes mass), texture_path, "
             "color_r/g/b, density (settable, recomputes mass), mass (read), is_awake (read), "
@@ -433,7 +433,7 @@ void ProjectManagerScreen::drawDocumentation() {
             "create_polygon(x, y, sides, circumradius, BodyType) (any regular N-gon), find_body(name) "
             "(first match), count(), remove_body(body), bodies() (every body, 1-indexed, for ipairs -- "
             "use .radius > 0 to tell a circle from a polygon), create_matter(x, y, radius, MatterKind), "
-            "find_matter(name), matter_count(), remove_matter(m), matter() (every Matter particle, "
+            "find_matter(name), matter_count(), remove_matter(m), matter() (every Matter object, "
             "1-indexed). Raycasting, collision filtering, rigid joints, and CCD are also scriptable -- "
             "see the \"Physics: Raycasting, Joints, Filtering, CCD\" section above.");
         ImGui::TextWrapped(
@@ -441,7 +441,7 @@ void ProjectManagerScreen::drawDocumentation() {
             "count_by_name(name), count_by_type(BodyType), count_by_matter_kind(MatterKind) (all return "
             "an int); find_bodies_by_name(name), find_bodies_by_type(BodyType), "
             "find_bodies_by_matter_kind(MatterKind) (all return a 1-indexed table of every match); plus "
-            "the Matter-particle equivalents count_matter_by_kind(MatterKind)/"
+            "the Matter-object equivalents count_matter_by_kind(MatterKind)/"
             "find_matter_by_kind(MatterKind).");
         ImGui::TextWrapped(
             "Globals: BodyType.Static / .Kinematic / .Dynamic, MatterKind.Rigidbody / .Matter / "
