@@ -231,9 +231,16 @@ void ProjectManagerScreen::drawDocumentation() {
         ImGui::BulletText("Reset Scene restores the scene to how it looked the last time you weren't\n"
                            "running (or were paused) -- it undoes whatever happened during Play.");
         ImGui::BulletText("Time Scale speeds up or slows down simulated time; Gravity Y changes world gravity.");
-        ImGui::BulletText("Per-body realism/speed trade-offs live on the body itself now (Inspector's\n"
-                           "\"Matter Kind\": Rigidbody/Matter/OptiMatter), not as a single scene-wide switch --\n"
-                           "see \"Body::matterKind\" in the README.");
+        ImGui::BulletText("Per-body realism/speed trade-offs live on the body itself (Inspector's\n"
+                           "\"Matter Kind\": Rigidbody/Matter/OptiMatter), not as a single scene-wide\n"
+                           "switch. Rigidbody is the ordinary, unaffected baseline. Matter is MORE\n"
+                           "accurate: tighter sleep thresholds, gentler position correction, and more\n"
+                           "forced substeps at the same speed, at real extra cost. OptiMatter is\n"
+                           "cheaper: looser sleep thresholds, snappier position correction, no forced\n"
+                           "extra substeps, and exempt from CCD even when it's on -- good for\n"
+                           "background/decorative bodies or large crowds. New bodies from the Spawn\n"
+                           "tool get Settings > Spawning > Default Matter Kind's choice (OptiMatter by\n"
+                           "default). See \"Body::matterKind\" in the README for the exact numbers.");
     }
 
     if (ImGui::CollapsingHeader("Viewport Tools", ImGuiTreeNodeFlags_DefaultOpen)) {

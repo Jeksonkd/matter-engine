@@ -1703,8 +1703,13 @@ void EditorApp::drawSettings() {
         ImGui::SetTooltip(
             "The Matter Kind every new body gets from the Spawn tool (viewport click). Doesn't\n"
             "affect bodies that already exist -- change an individual body's kind from its own\n"
-            "Inspector \"Matter Kind\" dropdown instead. OptiMatter by default: the cheapest,\n"
-            "highest-performance fidelity tier.");
+            "Inspector \"Matter Kind\" dropdown instead.\n\n"
+            "Rigidbody: the ordinary baseline, unaffected by any of this.\n"
+            "Matter: MORE accurate than Rigidbody -- stays awake longer, corrects overlaps more\n"
+            "gently, and forces extra substeps sooner -- at real extra cost.\n"
+            "OptiMatter (default): cheaper than Rigidbody -- sleeps sooner, corrects overlaps in\n"
+            "bigger snappier steps, skips forced extra substeps, and is exempt from CCD even\n"
+            "when it's on. Good for background/decorative bodies or large crowds.");
 
     ImGui::TextUnformatted("Reset Scene");
     ImGui::Separator();

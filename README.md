@@ -322,7 +322,7 @@ built with [SFML](https://www.sfml-dev.org/) + [Dear ImGui](https://github.com/o
   handling), not just a label — see below for what that means concretely.
 - **Default Matter Kind (Settings)**: which `MatterKind` the Spawn tool
   gives every newly placed body — Settings > Spawning > "Default Matter
-  Kind". `MatterKind::Rigidbody` by default; only affects bodies created
+  Kind". `MatterKind::OptiMatter` by default; only affects bodies created
   *after* changing it, not anything already in the scene (change an
   existing body's own kind from its Inspector instead).
 - **Raycasting and point queries**: `World::raycastClosest()`/`raycastAll()`
@@ -625,7 +625,7 @@ persistence) with zero duplicate code.
 Set via the Inspector's "Matter Kind" dropdown (right under a body's Type),
 `body.matter_kind` from Lua, or **Settings > Spawning > Default Matter
 Kind**, which sets what the Spawn tool gives every newly placed body
-(`MatterKind::Rigidbody` by default — existing bodies are never
+(`MatterKind::OptiMatter` by default — existing bodies are never
 retroactively changed by it). Verified in `tests/body_matter_kind_test.cpp`:
 an OptiMatter body still gains angular velocity from an off-center hit
 (proves rotation isn't disabled — this is a solver knob, not a
