@@ -433,16 +433,43 @@ void ScriptEngine::bindWorld(World& world) {
     lua_.new_usertype<DistanceJoint>("DistanceJoint",
         "body_a", sol::readonly_property([](const DistanceJoint& j) { return j.a; }),
         "body_b", sol::readonly_property([](const DistanceJoint& j) { return j.b; }),
-        "length", &DistanceJoint::length);
+        "length", &DistanceJoint::length,
+        // The one "checkbox": off (default) is the plain exact-length
+        // joint above, same cost as always. On, .length above stops being
+        // enforced -- set .min_length/.max_length (both start equal to the
+        // joint's creation-time length, so turning this on alone changes
+        // nothing) and/or .motor_speed/.max_motor_force to actually use it.
+        "enable_motor_limit", &DistanceJoint::enableMotorLimit,
+        "min_length", &DistanceJoint::minLength,
+        "max_length", &DistanceJoint::maxLength,
+        "motor_speed", &DistanceJoint::motorSpeed,
+        "max_motor_force", &DistanceJoint::maxMotorForce);
     lua_.new_usertype<RevoluteJoint>("RevoluteJoint",
         "body_a", sol::readonly_property([](const RevoluteJoint& j) { return j.a; }),
-        "body_b", sol::readonly_property([](const RevoluteJoint& j) { return j.b; }));
+        "body_b", sol::readonly_property([](const RevoluteJoint& j) { return j.b; }),
+        // Off (default): free rotation, same cost as always. On: set
+        // .lower_angle < .upper_angle (radians, both start at 0 -- a
+        // real range must be set explicitly, or this alone would lock
+        // the joint solid) and/or .motor_speed/.max_motor_torque.
+        "enable_motor_limit", &RevoluteJoint::enableMotorLimit,
+        "lower_angle", &RevoluteJoint::lowerAngle,
+        "upper_angle", &RevoluteJoint::upperAngle,
+        "motor_speed", &RevoluteJoint::motorSpeed,
+        "max_motor_torque", &RevoluteJoint::maxMotorTorque);
     lua_.new_usertype<WeldJoint>("WeldJoint",
         "body_a", sol::readonly_property([](const WeldJoint& j) { return j.a; }),
         "body_b", sol::readonly_property([](const WeldJoint& j) { return j.b; }));
     lua_.new_usertype<PrismaticJoint>("PrismaticJoint",
         "body_a", sol::readonly_property([](const PrismaticJoint& j) { return j.a; }),
-        "body_b", sol::readonly_property([](const PrismaticJoint& j) { return j.b; }));
+        "body_b", sol::readonly_property([](const PrismaticJoint& j) { return j.b; }),
+        // Off (default): free sliding, same cost as always. On: set
+        // .lower_translation < .upper_translation (meters, both start at 0)
+        // and/or .motor_speed/.max_motor_force.
+        "enable_motor_limit", &PrismaticJoint::enableMotorLimit,
+        "lower_translation", &PrismaticJoint::lowerTranslation,
+        "upper_translation", &PrismaticJoint::upperTranslation,
+        "motor_speed", &PrismaticJoint::motorSpeed,
+        "max_motor_force", &PrismaticJoint::maxMotorForce);
 
     lua_["world"] = &world;
 

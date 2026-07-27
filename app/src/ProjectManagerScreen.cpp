@@ -303,7 +303,12 @@ void ProjectManagerScreen::drawDocumentation() {
         ImGui::BulletText("world:create_distance_joint / create_revolute_joint / create_weld_joint /\n"
                            "create_prismatic_joint(a, b, ...) -- RIGID connections (exact distance,\n"
                            "shared pivot, full weld, sliding axis), unlike create_spring's soft,\n"
-                           "stretchy force. No motors/limits yet -- just the bare constraint.");
+                           "stretchy force.");
+        ImGui::BulletText("Distance/Revolute/Prismatic joints (not Weld -- no free DOF) can have a\n"
+                           "motor and/or limit: j.enable_motor_limit = true (off by default, free/\n"
+                           "exact as before when off), then j.motor_speed + j.max_motor_torque (or\n"
+                           "_force) and/or j.lower_angle/upper_angle (Revolute), j.lower_translation/\n"
+                           "upper_translation (Prismatic), j.min_length/max_length (Distance).");
         ImGui::BulletText("world.enable_ccd = true -- opt-in continuous collision detection for\n"
                            "fast-moving CIRCLES only. Off by default and skipped for OptiMatter\n"
                            "Bodies/Matter objects: it sweeps against every other object with no\n"

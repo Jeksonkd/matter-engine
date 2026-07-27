@@ -3,6 +3,19 @@
 Notable changes per release. Each GitHub Release's description is generated
 from the matching section here (see `.github/workflows/release.yml`).
 
+## v0.3.0
+
+- **Rigid joints can have motors and limits now.** `DistanceJoint`/
+  `RevoluteJoint`/`PrismaticJoint` each get one `enable_motor_limit` switch
+  (off by default, same cost as before when off): on, the joint's one free
+  DOF (length, relative angle, or slide translation) can be driven by a
+  motor (target speed + a max torque/force) and/or bounded by a limit
+  (lower/upper). A door that swings free but stops at 90°, a continuously
+  driven wheel, a winch, a piston with a fixed stroke. `WeldJoint` doesn't
+  get this -- it has no free DOF left to drive or bound. Fully scriptable
+  (`enable_motor_limit`, `motor_speed`, `max_motor_torque`/`max_motor_force`,
+  and the matching `lower_*`/`upper_*` or `min_length`/`max_length` fields).
+
 ## v0.2.0
 
 - **OptiMatter is now the default Matter Kind.** New bodies spawned via the

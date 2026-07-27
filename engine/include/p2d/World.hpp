@@ -276,10 +276,12 @@ private:
         Vec2 rA, rB;
         Vec2 u; // unit vector from A's anchor to B's anchor
         float mass = 0.0f;
+        float length = 0.0f; // current |B.anchor - A.anchor|, reused by motor/limit -- same Jacobian as the base constraint
     };
     struct RevoluteJointConstraint {
         Vec2 rA, rB;
         float k11 = 0.0f, k12 = 0.0f, k22 = 0.0f; // 2x2 effective mass matrix (symmetric)
+        float angleMass = 0.0f; // motor/limit effective mass -- 1/(invIA+invIB)
     };
     struct WeldJointConstraint {
         Vec2 rA, rB;
@@ -291,6 +293,9 @@ private:
         float s1 = 0.0f, s2 = 0.0f; // perpendicular-constraint Jacobian terms, see Joint.hpp
         float perpMass = 0.0f;
         float angleMass = 0.0f;
+        float s1Axis = 0.0f, s2Axis = 0.0f; // same idea as s1/s2, but for the AXIAL (motor/limit) Jacobian
+        float axialMass = 0.0f;
+        float translation = 0.0f; // current axis.dot(d), reused by motor/limit
     };
 
     std::vector<std::unique_ptr<DistanceJoint>> distanceJoints_;
@@ -306,7 +311,11 @@ private:
     void integrateForces(float dt);
     void broadAndNarrowPhase();
     void solveVelocities();
-    void solveJointVelocities();
+    // `dt` (the substep duration) is only needed to convert a joint motor's
+    // max torque/force (N*m or N) into a max IMPULSE for this substep
+    // (impulse = force * dt) -- unused when no joint has enableMotorLimit
+    // set.
+    void solveJointVelocities(float dt);
     void integrateVelocities(float dt);
     void applyCcd(float dt);
     void correctPositions();

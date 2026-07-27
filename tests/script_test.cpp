@@ -338,6 +338,51 @@ int main() {
     check(revoluteJointScript.valid() && revoluteJointScript.get<bool>(),
           "world:create_revolute_joint() runs without error and returns a handle");
 
+    // Joint motors/limits: enable_motor_limit + the per-kind motor/limit
+    // fields are all settable/readable from Lua.
+    sol::protected_function_result distanceMotorLimitScript = engine.lua().script(
+        "local a = world:find_body('joint_anchor') "
+        "local b = world:find_body('joint_bob') "
+        "local j = world:create_distance_joint(a, b, a.position.x, a.position.y, b.position.x, b.position.y) "
+        "j.enable_motor_limit = true "
+        "j.min_length = 1.0 "
+        "j.max_length = 8.0 "
+        "j.motor_speed = 0.5 "
+        "j.max_motor_force = 50.0 "
+        "return j.enable_motor_limit and j.min_length == 1.0 and j.max_length == 8.0 "
+        "and j.motor_speed == 0.5 and j.max_motor_force == 50.0");
+    check(distanceMotorLimitScript.valid() && distanceMotorLimitScript.get<bool>(),
+          "DistanceJoint's enable_motor_limit/min_length/max_length/motor_speed/max_motor_force are settable from Lua");
+
+    sol::protected_function_result revoluteMotorLimitScript = engine.lua().script(
+        "local a = world:find_body('joint_anchor') "
+        "local b = world:find_body('joint_bob') "
+        "local j = world:create_revolute_joint(a, b, a.position.x, a.position.y) "
+        "j.enable_motor_limit = true "
+        "j.lower_angle = -0.5 "
+        "j.upper_angle = 0.5 "
+        "j.motor_speed = 1.0 "
+        "j.max_motor_torque = 20.0 "
+        "return j.enable_motor_limit and j.lower_angle == -0.5 and j.upper_angle == 0.5 "
+        "and j.motor_speed == 1.0 and j.max_motor_torque == 20.0");
+    check(revoluteMotorLimitScript.valid() && revoluteMotorLimitScript.get<bool>(),
+          "RevoluteJoint's enable_motor_limit/lower_angle/upper_angle/motor_speed/max_motor_torque are settable from Lua");
+
+    sol::protected_function_result prismaticMotorLimitScript = engine.lua().script(
+        "local a = world:find_body('joint_anchor') "
+        "local b = world:find_body('joint_bob') "
+        "local j = world:create_prismatic_joint(a, b, a.position.x, a.position.y, 1.0, 0.0) "
+        "j.enable_motor_limit = true "
+        "j.lower_translation = 0.0 "
+        "j.upper_translation = 3.0 "
+        "j.motor_speed = 2.0 "
+        "j.max_motor_force = 30.0 "
+        "return j.enable_motor_limit and j.lower_translation == 0.0 and j.upper_translation == 3.0 "
+        "and j.motor_speed == 2.0 and j.max_motor_force == 30.0");
+    check(prismaticMotorLimitScript.valid() && prismaticMotorLimitScript.get<bool>(),
+          "PrismaticJoint's enable_motor_limit/lower_translation/upper_translation/motor_speed/max_motor_force are "
+          "settable from Lua");
+
     // enable_ccd: settable from Lua.
     sol::protected_function_result ccdScript = engine.lua().script(
         "world.enable_ccd = true "

@@ -26,6 +26,17 @@ namespace p2d {
 // Keeps two anchor points exactly `length` apart. 1 constrained DOF
 // (distance); relative rotation and sliding are otherwise free -- think of
 // it as a rigid rod or a taut, inextensible rope between the two anchors.
+//
+// `enableMotorLimit` is the one switch that turns on everything below --
+// off (the default) costs nothing beyond `length`/`impulse` above and
+// behaves exactly as it always has (bilateral, both push and pull). On,
+// the single exact-length equality constraint is replaced by two one-sided
+// limits (`minLength`/`maxLength`, both defaulted to the creation-time
+// `length` by createDistanceJoint() -- so flipping this on alone changes
+// nothing until you actually widen the range) plus an optional motor
+// driving the length at `motorSpeed` (m/s, positive = lengthening), capped
+// by `maxMotorForce` (0 = no motor authority at all). Think rope-with-a-
+// winch instead of a rigid rod.
 struct DistanceJoint {
     Body* a = nullptr;
     Body* b = nullptr;
@@ -34,11 +45,29 @@ struct DistanceJoint {
     float length = 0.0f;
 
     float impulse = 0.0f;
+
+    bool enableMotorLimit = false;
+    float minLength = 0.0f;
+    float maxLength = 0.0f;
+    float motorSpeed = 0.0f;
+    float maxMotorForce = 0.0f;
+    float motorImpulse = 0.0f;
+    float lowerImpulse = 0.0f;
+    float upperImpulse = 0.0f;
 };
 
 // Pins one anchor point on A to one on B (both coincide in world space).
 // 2 constrained DOF (position); relative rotation is completely free --
 // a door hinge, a wheel on an axle, a pendulum's pivot.
+//
+// `enableMotorLimit` (off by default, same cost as before when off) adds:
+// an angle limit (`lowerAngle`/`upperAngle`, radians, measured on the
+// relative angle `(b->rotation - a->rotation) - referenceAngle` -- both
+// default to 0 so a limit only actually engages once you set
+// `lowerAngle < upperAngle`) and/or a motor driving that same relative
+// angle to change at `motorSpeed` (rad/s), capped by `maxMotorTorque`
+// (0 = no motor authority). A door that swings free but stops at 90°, or
+// a continuously driven wheel.
 struct RevoluteJoint {
     Body* a = nullptr;
     Body* b = nullptr;
@@ -46,6 +75,16 @@ struct RevoluteJoint {
     Vec2 localAnchorB;
 
     Vec2 impulse;
+
+    bool enableMotorLimit = false;
+    float referenceAngle = 0.0f; // b->rotation - a->rotation, captured at creation
+    float lowerAngle = 0.0f;
+    float upperAngle = 0.0f;
+    float motorSpeed = 0.0f;
+    float maxMotorTorque = 0.0f;
+    float motorImpulse = 0.0f;
+    float lowerImpulse = 0.0f;
+    float upperImpulse = 0.0f;
 };
 
 // RevoluteJoint's point constraint PLUS a fixed relative angle -- 3
@@ -57,6 +96,10 @@ struct RevoluteJoint {
 // World::solveVelocities()) that still converges to a correctly rigid weld
 // at rest, just not via the exact same transient path a fully-coupled
 // solve would take.
+//
+// Deliberately no `enableMotorLimit` here, unlike the other three: a weld
+// has no free DOF at all (position AND angle are both fully constrained)
+// -- there's nothing left to drive or bound.
 struct WeldJoint {
     Body* a = nullptr;
     Body* b = nullptr;
@@ -74,6 +117,15 @@ struct WeldJoint {
 // distance along the axis). A piston, a drawer, a platform that only moves
 // straight up and down. Solved as two independent constraints (same
 // simplification as WeldJoint, for the same reason).
+//
+// `enableMotorLimit` (off by default, same cost as before when off) adds:
+// a translation limit (`lowerTranslation`/`upperTranslation`, meters,
+// measured along `localAxisA` from the anchor offset at creation -- both
+// default to 0 so a limit only actually engages once you set
+// `lowerTranslation < upperTranslation`) and/or a motor driving that same
+// translation to change at `motorSpeed` (m/s), capped by `maxMotorForce`
+// (0 = no motor authority). A piston that only travels a fixed stroke, or
+// a continuously driven slider.
 struct PrismaticJoint {
     Body* a = nullptr;
     Body* b = nullptr;
@@ -84,6 +136,15 @@ struct PrismaticJoint {
 
     float perpImpulse = 0.0f;
     float angleImpulse = 0.0f;
+
+    bool enableMotorLimit = false;
+    float lowerTranslation = 0.0f;
+    float upperTranslation = 0.0f;
+    float motorSpeed = 0.0f;
+    float maxMotorForce = 0.0f;
+    float motorImpulse = 0.0f;
+    float lowerImpulse = 0.0f;
+    float upperImpulse = 0.0f;
 };
 
 } // namespace p2d

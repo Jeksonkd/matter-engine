@@ -132,6 +132,12 @@ DistanceJoint* World::createDistanceJoint(Body* a, Body* b, Vec2 worldAnchorA, V
     j->localAnchorA = rotate(worldAnchorA - a->position, -a->rotation);
     j->localAnchorB = rotate(worldAnchorB - b->position, -b->rotation);
     j->length = (worldAnchorB - worldAnchorA).length();
+    // So flipping enableMotorLimit on later, without touching these, keeps
+    // the exact same effective behavior (a zero-width [min, max] range at
+    // the original length) instead of suddenly going slack -- see
+    // Joint.hpp's doc comment.
+    j->minLength = j->length;
+    j->maxLength = j->length;
     a->wake();
     b->wake();
     DistanceJoint* ptr = j.get();
@@ -145,6 +151,7 @@ RevoluteJoint* World::createRevoluteJoint(Body* a, Body* b, Vec2 worldAnchor) {
     j->b = b;
     j->localAnchorA = rotate(worldAnchor - a->position, -a->rotation);
     j->localAnchorB = rotate(worldAnchor - b->position, -b->rotation);
+    j->referenceAngle = b->rotation - a->rotation;
     a->wake();
     b->wake();
     RevoluteJoint* ptr = j.get();
@@ -357,7 +364,7 @@ void World::step(float dt) {
         integrateForces(subDt);
         broadAndNarrowPhase();
         solveVelocities();
-        solveJointVelocities();
+        solveJointVelocities(subDt);
         integrateVelocities(subDt);
         applyCcd(subDt);
         correctPositions();
@@ -842,7 +849,7 @@ void World::solveVelocities() {
     }
 }
 
-void World::solveJointVelocities() {
+void World::solveJointVelocities(float dt) {
     // Same three-phase structure as solveVelocities() above (init geometry/
     // effective-mass terms once, warm-start, then iterate) -- see Joint.hpp
     // for what each joint type actually constrains and why Weld/Prismatic
@@ -860,6 +867,7 @@ void World::solveJointVelocities() {
         dc.rB = rotate(j.localAnchorB, B.rotation);
         Vec2 d = (B.position + dc.rB) - (A.position + dc.rA);
         float len = d.length();
+        dc.length = len;
         dc.u = (len > 1e-9f) ? d * (1.0f / len) : Vec2(1.0f, 0.0f);
 
         float crAu = dc.rA.cross(dc.u);
@@ -867,8 +875,12 @@ void World::solveJointVelocities() {
         float invMassSum = A.invMass + B.invMass + A.invInertia * crAu * crAu + B.invInertia * crBu * crBu;
         dc.mass = invMassSum > 0.0f ? 1.0f / invMassSum : 0.0f;
 
-        // Warm start.
-        Vec2 P = dc.u * j.impulse;
+        // Warm start -- the exact-length accumulator and the motor/limit
+        // ones are mutually exclusive in practice (only one set is ever
+        // driven away from 0 by the iteration loop below, depending on
+        // enableMotorLimit), so summing all four here is safe either way.
+        float totalImpulse = j.impulse + j.motorImpulse + j.lowerImpulse - j.upperImpulse;
+        Vec2 P = dc.u * totalImpulse;
         A.applyImpulse(-1.0f * P, dc.rA);
         B.applyImpulse(P, dc.rB);
     }
@@ -880,14 +892,74 @@ void World::solveJointVelocities() {
             Body& A = *j.a;
             Body& B = *j.b;
 
-            Vec2 relVel = (B.velocity + cross(B.angularVelocity, dc.rB)) - (A.velocity + cross(A.angularVelocity, dc.rA));
-            float Cdot = relVel.dot(dc.u);
-            float lambda = -dc.mass * Cdot;
-            j.impulse += lambda;
+            if (!j.enableMotorLimit) {
+                Vec2 relVel =
+                    (B.velocity + cross(B.angularVelocity, dc.rB)) - (A.velocity + cross(A.angularVelocity, dc.rA));
+                float Cdot = relVel.dot(dc.u);
+                float lambda = -dc.mass * Cdot;
+                j.impulse += lambda;
 
-            Vec2 P = dc.u * lambda;
-            A.applyImpulse(-1.0f * P, dc.rA);
-            B.applyImpulse(P, dc.rB);
+                Vec2 P = dc.u * lambda;
+                A.applyImpulse(-1.0f * P, dc.rA);
+                B.applyImpulse(P, dc.rB);
+                continue;
+            }
+
+            // Motor: drives the length to change at motorSpeed (m/s along
+            // dc.u, positive = lengthening), capped to what maxMotorForce
+            // can apply in this substep (impulse = force * dt). Same
+            // clamped-accumulator pattern as a contact's normal impulse,
+            // just bilateral (can push OR pull) instead of one-sided.
+            if (j.maxMotorForce > 0.0f) {
+                Vec2 relVel =
+                    (B.velocity + cross(B.angularVelocity, dc.rB)) - (A.velocity + cross(A.angularVelocity, dc.rA));
+                float Cdot = relVel.dot(dc.u) - j.motorSpeed;
+                float impulse = -dc.mass * Cdot;
+                float oldImpulse = j.motorImpulse;
+                float maxImpulse = j.maxMotorForce * dt;
+                j.motorImpulse = std::clamp(oldImpulse + impulse, -maxImpulse, maxImpulse);
+                impulse = j.motorImpulse - oldImpulse;
+                Vec2 P = dc.u * impulse;
+                A.applyImpulse(-1.0f * P, dc.rA);
+                B.applyImpulse(P, dc.rB);
+            }
+
+            // Lower limit (length >= minLength): a one-sided constraint,
+            // same idea as a contact's non-penetration -- only solved (and
+            // only allowed to push, never pull) while actually at or past
+            // the boundary; the accumulator resets to 0 the moment it's
+            // not, so there's nothing stale to warm-start from an inactive
+            // limit next step.
+            if (dc.length - j.minLength <= 0.0f) {
+                Vec2 relVel =
+                    (B.velocity + cross(B.angularVelocity, dc.rB)) - (A.velocity + cross(A.angularVelocity, dc.rA));
+                float Cdot = relVel.dot(dc.u);
+                float impulse = -dc.mass * Cdot;
+                float oldImpulse = j.lowerImpulse;
+                j.lowerImpulse = std::max(oldImpulse + impulse, 0.0f);
+                impulse = j.lowerImpulse - oldImpulse;
+                Vec2 P = dc.u * impulse;
+                A.applyImpulse(-1.0f * P, dc.rA);
+                B.applyImpulse(P, dc.rB);
+            } else {
+                j.lowerImpulse = 0.0f;
+            }
+
+            // Upper limit (length <= maxLength): same idea, mirrored.
+            if (j.maxLength - dc.length <= 0.0f) {
+                Vec2 relVel =
+                    (B.velocity + cross(B.angularVelocity, dc.rB)) - (A.velocity + cross(A.angularVelocity, dc.rA));
+                float Cdot = -relVel.dot(dc.u);
+                float impulse = -dc.mass * Cdot;
+                float oldImpulse = j.upperImpulse;
+                j.upperImpulse = std::max(oldImpulse + impulse, 0.0f);
+                impulse = j.upperImpulse - oldImpulse;
+                Vec2 P = dc.u * (-impulse);
+                A.applyImpulse(-1.0f * P, dc.rA);
+                B.applyImpulse(P, dc.rB);
+            } else {
+                j.upperImpulse = 0.0f;
+            }
         }
     }
 
@@ -903,19 +975,80 @@ void World::solveJointVelocities() {
         rc.k11 = A.invMass + B.invMass + A.invInertia * rc.rA.y * rc.rA.y + B.invInertia * rc.rB.y * rc.rB.y;
         rc.k12 = -A.invInertia * rc.rA.x * rc.rA.y - B.invInertia * rc.rB.x * rc.rB.y;
         rc.k22 = A.invMass + B.invMass + A.invInertia * rc.rA.x * rc.rA.x + B.invInertia * rc.rB.x * rc.rB.x;
+        float angleInvMassSum = A.invInertia + B.invInertia;
+        rc.angleMass = angleInvMassSum > 0.0f ? 1.0f / angleInvMassSum : 0.0f;
 
         A.applyImpulse(-1.0f * j.impulse, rc.rA);
         B.applyImpulse(j.impulse, rc.rB);
+        if (j.enableMotorLimit) {
+            float axialImpulse = j.motorImpulse + j.lowerImpulse - j.upperImpulse;
+            A.angularVelocity -= A.invInertia * axialImpulse;
+            B.angularVelocity += B.invInertia * axialImpulse;
+        }
     }
     for (int iter = 0; iter < velocityIterations; ++iter) {
         for (size_t i = 0; i < revoluteJoints_.size(); ++i) {
             RevoluteJoint& j = *revoluteJoints_[i];
             RevoluteJointConstraint& rc = revoluteJointConstraintCache_[i];
+            Body& A = *j.a;
+            Body& B = *j.b;
+
+            if (j.enableMotorLimit && rc.angleMass > 0.0f) {
+                // Motor: drives the relative angle to change at motorSpeed
+                // (rad/s), capped to what maxMotorTorque can apply this
+                // substep (impulse = torque * dt).
+                if (j.maxMotorTorque > 0.0f) {
+                    float Cdot = B.angularVelocity - A.angularVelocity - j.motorSpeed;
+                    float impulse = -rc.angleMass * Cdot;
+                    float oldImpulse = j.motorImpulse;
+                    float maxImpulse = j.maxMotorTorque * dt;
+                    j.motorImpulse = std::clamp(oldImpulse + impulse, -maxImpulse, maxImpulse);
+                    impulse = j.motorImpulse - oldImpulse;
+                    A.angularVelocity -= A.invInertia * impulse;
+                    B.angularVelocity += B.invInertia * impulse;
+                }
+
+                // Limits: one-sided, same "only solved while actually at or
+                // past the boundary, reset to 0 impulse otherwise" pattern
+                // as the DistanceJoint limits above. Gated on lowerAngle <
+                // upperAngle (both default to 0, i.e. NOT a real range) --
+                // without this, the two branches below would both trigger
+                // at angle == 0 and lock the joint solid the instant
+                // enableMotorLimit is set, instead of leaving rotation free
+                // until a real range is actually configured.
+                if (j.lowerAngle < j.upperAngle) {
+                    float angle = (B.rotation - A.rotation) - j.referenceAngle;
+                    if (angle - j.lowerAngle <= 0.0f) {
+                        float Cdot = B.angularVelocity - A.angularVelocity;
+                        float impulse = -rc.angleMass * Cdot;
+                        float oldImpulse = j.lowerImpulse;
+                        j.lowerImpulse = std::max(oldImpulse + impulse, 0.0f);
+                        impulse = j.lowerImpulse - oldImpulse;
+                        A.angularVelocity -= A.invInertia * impulse;
+                        B.angularVelocity += B.invInertia * impulse;
+                    } else {
+                        j.lowerImpulse = 0.0f;
+                    }
+                    if (j.upperAngle - angle <= 0.0f) {
+                        float Cdot = -(B.angularVelocity - A.angularVelocity);
+                        float impulse = -rc.angleMass * Cdot;
+                        float oldImpulse = j.upperImpulse;
+                        j.upperImpulse = std::max(oldImpulse + impulse, 0.0f);
+                        impulse = j.upperImpulse - oldImpulse;
+                        A.angularVelocity += A.invInertia * impulse;
+                        B.angularVelocity -= B.invInertia * impulse;
+                    } else {
+                        j.upperImpulse = 0.0f;
+                    }
+                } else {
+                    j.lowerImpulse = 0.0f;
+                    j.upperImpulse = 0.0f;
+                }
+            }
+
             float det = rc.k11 * rc.k22 - rc.k12 * rc.k12;
             if (std::fabs(det) < 1e-12f) continue;
             float invDet = 1.0f / det;
-            Body& A = *j.a;
-            Body& B = *j.b;
 
             Vec2 Cdot = (B.velocity + cross(B.angularVelocity, rc.rB)) - (A.velocity + cross(A.angularVelocity, rc.rA));
             Vec2 impulse(-invDet * (rc.k22 * Cdot.x - rc.k12 * Cdot.y), -invDet * (-rc.k12 * Cdot.x + rc.k11 * Cdot.y));
@@ -995,6 +1128,16 @@ void World::solveJointVelocities() {
         float angleInvMassSum = A.invInertia + B.invInertia;
         pc.angleMass = angleInvMassSum > 0.0f ? 1.0f / angleInvMassSum : 0.0f;
 
+        // Same Jacobian shape as s1/s2/perpMass above, just projected onto
+        // the slide axis instead of perpendicular to it -- this is what the
+        // motor/limit below actually drive.
+        pc.translation = pc.axis.dot(d);
+        pc.s1Axis = (d + rA).cross(pc.axis);
+        pc.s2Axis = rB.cross(pc.axis);
+        float axialInvMassSum =
+            A.invMass + B.invMass + A.invInertia * pc.s1Axis * pc.s1Axis + B.invInertia * pc.s2Axis * pc.s2Axis;
+        pc.axialMass = axialInvMassSum > 0.0f ? 1.0f / axialInvMassSum : 0.0f;
+
         Vec2 P = pc.perp * j.perpImpulse;
         float LA = j.perpImpulse * pc.s1;
         float LB = j.perpImpulse * pc.s2;
@@ -1004,6 +1147,14 @@ void World::solveJointVelocities() {
         B.angularVelocity += B.invInertia * LB;
         A.angularVelocity -= A.invInertia * j.angleImpulse;
         B.angularVelocity += B.invInertia * j.angleImpulse;
+        if (j.enableMotorLimit) {
+            float axialImpulse = j.motorImpulse + j.lowerImpulse - j.upperImpulse;
+            Vec2 Paxis = pc.axis * axialImpulse;
+            A.velocity -= Paxis * A.invMass;
+            A.angularVelocity -= A.invInertia * axialImpulse * pc.s1Axis;
+            B.velocity += Paxis * B.invMass;
+            B.angularVelocity += B.invInertia * axialImpulse * pc.s2Axis;
+        }
     }
     for (int iter = 0; iter < velocityIterations; ++iter) {
         for (size_t i = 0; i < prismaticJoints_.size(); ++i) {
@@ -1018,6 +1169,70 @@ void World::solveJointVelocities() {
                 j.angleImpulse += impulse;
                 A.angularVelocity -= A.invInertia * impulse;
                 B.angularVelocity += B.invInertia * impulse;
+            }
+
+            if (j.enableMotorLimit && pc.axialMass > 0.0f) {
+                auto axialCdot = [&]() {
+                    return pc.axis.dot(B.velocity - A.velocity) + pc.s2Axis * B.angularVelocity -
+                           pc.s1Axis * A.angularVelocity;
+                };
+
+                // Motor: drives the translation to change at motorSpeed
+                // (m/s along pc.axis), capped to what maxMotorForce can
+                // apply this substep (impulse = force * dt).
+                if (j.maxMotorForce > 0.0f) {
+                    float Cdot = axialCdot() - j.motorSpeed;
+                    float impulse = -pc.axialMass * Cdot;
+                    float oldImpulse = j.motorImpulse;
+                    float maxImpulse = j.maxMotorForce * dt;
+                    j.motorImpulse = std::clamp(oldImpulse + impulse, -maxImpulse, maxImpulse);
+                    impulse = j.motorImpulse - oldImpulse;
+                    Vec2 P = pc.axis * impulse;
+                    A.velocity -= P * A.invMass;
+                    A.angularVelocity -= A.invInertia * impulse * pc.s1Axis;
+                    B.velocity += P * B.invMass;
+                    B.angularVelocity += B.invInertia * impulse * pc.s2Axis;
+                }
+
+                // Limits: one-sided, same pattern as DistanceJoint/
+                // RevoluteJoint above, and gated the same way on
+                // lowerTranslation < upperTranslation (both default to 0 --
+                // a real translation range must be set explicitly, or
+                // enabling this alone would lock the slide solid at 0
+                // instead of leaving it free).
+                if (j.lowerTranslation < j.upperTranslation) {
+                    if (pc.translation - j.lowerTranslation <= 0.0f) {
+                        float Cdot = axialCdot();
+                        float impulse = -pc.axialMass * Cdot;
+                        float oldImpulse = j.lowerImpulse;
+                        j.lowerImpulse = std::max(oldImpulse + impulse, 0.0f);
+                        impulse = j.lowerImpulse - oldImpulse;
+                        Vec2 P = pc.axis * impulse;
+                        A.velocity -= P * A.invMass;
+                        A.angularVelocity -= A.invInertia * impulse * pc.s1Axis;
+                        B.velocity += P * B.invMass;
+                        B.angularVelocity += B.invInertia * impulse * pc.s2Axis;
+                    } else {
+                        j.lowerImpulse = 0.0f;
+                    }
+                    if (j.upperTranslation - pc.translation <= 0.0f) {
+                        float Cdot = -axialCdot();
+                        float impulse = -pc.axialMass * Cdot;
+                        float oldImpulse = j.upperImpulse;
+                        j.upperImpulse = std::max(oldImpulse + impulse, 0.0f);
+                        impulse = j.upperImpulse - oldImpulse;
+                        Vec2 P = pc.axis * (-impulse);
+                        A.velocity -= P * A.invMass;
+                        A.angularVelocity -= A.invInertia * (-impulse) * pc.s1Axis;
+                        B.velocity += P * B.invMass;
+                        B.angularVelocity += B.invInertia * (-impulse) * pc.s2Axis;
+                    } else {
+                        j.upperImpulse = 0.0f;
+                    }
+                } else {
+                    j.lowerImpulse = 0.0f;
+                    j.upperImpulse = 0.0f;
+                }
             }
 
             if (pc.perpMass > 0.0f) {
@@ -1242,7 +1457,11 @@ void World::correctJointPositions() {
         float len = d.length();
         if (len < 1e-9f) continue;
         Vec2 u = d * (1.0f / len);
-        float C = len - j.length;
+        // With motors/limits on, there's no single target length anymore --
+        // only correct back toward whichever bound (if any) is currently
+        // violated, same "clamp, then correct the excess" idea the limit
+        // velocity constraints above use.
+        float C = j.enableMotorLimit ? (len - std::clamp(len, j.minLength, j.maxLength)) : (len - j.length);
 
         float crAu = rA.cross(u);
         float crBu = rB.cross(u);
@@ -1262,6 +1481,25 @@ void World::correctJointPositions() {
         RevoluteJoint& j = *jp;
         Body& A = *j.a;
         Body& B = *j.b;
+
+        // Angle limit, decoupled from the point constraint below (same
+        // "solve independently, in sequence" simplification Weld/Prismatic
+        // already use) -- only corrects if actually outside [lowerAngle,
+        // upperAngle], and only when that's a real (non-empty) range, same
+        // guard as the velocity solve above.
+        if (j.enableMotorLimit && j.lowerAngle < j.upperAngle) {
+            float angleInvMassSum = A.invInertia + B.invInertia;
+            if (angleInvMassSum > 0.0f) {
+                float angleMass = 1.0f / angleInvMassSum;
+                float angle = (B.rotation - A.rotation) - j.referenceAngle;
+                float Cangle = angle - std::clamp(angle, j.lowerAngle, j.upperAngle);
+                if (Cangle != 0.0f) {
+                    float impulse = -Cangle * angleMass * percent;
+                    A.rotation -= impulse * A.invInertia;
+                    B.rotation += impulse * B.invInertia;
+                }
+            }
+        }
 
         Vec2 rA = rotate(j.localAnchorA, A.rotation);
         Vec2 rB = rotate(j.localAnchorB, B.rotation);
@@ -1348,6 +1586,31 @@ void World::correctJointPositions() {
         A.rotation -= LA * A.invInertia;
         B.position += P * B.invMass;
         B.rotation += LB * B.invInertia;
+
+        // Translation limit, same "clamp to the range, correct only the
+        // excess" idea DistanceJoint/RevoluteJoint use above, gated the
+        // same way on lowerTranslation < upperTranslation.
+        if (j.enableMotorLimit && j.lowerTranslation < j.upperTranslation) {
+            float translation = axis.dot(d);
+            float Cx = translation - std::clamp(translation, j.lowerTranslation, j.upperTranslation);
+            if (Cx != 0.0f) {
+                float s1Axis = (d + rA).cross(axis);
+                float s2Axis = rB.cross(axis);
+                float axialInvMassSum =
+                    A.invMass + B.invMass + A.invInertia * s1Axis * s1Axis + B.invInertia * s2Axis * s2Axis;
+                if (axialInvMassSum > 0.0f) {
+                    float axialMass = 1.0f / axialInvMassSum;
+                    float axialImpulse = -Cx * axialMass * percent;
+                    Vec2 Paxis = axis * axialImpulse;
+                    float LAaxis = axialImpulse * s1Axis;
+                    float LBaxis = axialImpulse * s2Axis;
+                    A.position -= Paxis * A.invMass;
+                    A.rotation -= LAaxis * A.invInertia;
+                    B.position += Paxis * B.invMass;
+                    B.rotation += LBaxis * B.invInertia;
+                }
+            }
+        }
     }
 }
 

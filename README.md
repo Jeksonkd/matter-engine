@@ -1,5 +1,8 @@
 # Matter Engine
 
+> **Disclaimer:** this project was built using [Claude Code](https://claude.com/claude-code),
+> Anthropic's AI coding assistant.
+
 A small 2D rigid-body physics engine written in C++17, with Lua scripting
 embedded via [sol2](https://github.com/ThePhD/sol2), and a visual editor
 built with [SFML](https://www.sfml-dev.org/) + [Dear ImGui](https://github.com/ocornut/imgui).
@@ -425,6 +428,43 @@ step at full strength). Box2D's real joint solver applies the full
 correction, no damping factor — matching that (not the contact convention)
 was the actual fix, verified with a throwaway diagnostic before landing in
 `correctJointPositions()`.
+
+**Optional motors and limits** (`enableMotorLimit`, on `DistanceJoint`/
+`RevoluteJoint`/`PrismaticJoint` — not `WeldJoint`, which has no free DOF
+left to drive or bound): one bool per joint, off by default, at zero extra
+cost when off — the exact same code path as before runs unchanged. On, each
+joint's one free DOF (length, relative angle, or translation) gets an
+optional **motor** (`motorSpeed` + a `maxMotor*` cap converting a max
+torque/force into a max *impulse* for the current substep, `impulse = force
+* dt` — the same clamped-accumulator pattern as a contact's normal impulse,
+just bilateral instead of one-sided) and/or a **limit** (`lower*`/`upper*`,
+two independent *one-sided* velocity constraints — solved, and warm-started,
+only while actually at or past their own boundary, exactly like a contact's
+non-penetration constraint; the accumulator resets to 0 the instant it
+isn't, so there's nothing stale left to warm-start from an inactive limit
+next step). Position correction gets the same one-sided treatment: clamp
+the current value into `[lower, upper]` and correct only the excess, same
+"full correction, no Baumgarte damping" reasoning as the base constraints
+above.
+
+Limits default to `lower == upper == 0` (Revolute/Prismatic) specifically
+so that flipping `enableMotorLimit` on *by itself* doesn't change anything
+observable *unless* it would — and that distinction actually caught a real
+bug while building this: the first version gated each limit branch only on
+"currently at or past this bound," with no check that `lower < upper` first.
+With both defaulting to 0, `angle <= lower` and `angle >= upper` are BOTH
+true at `angle == 0` — so the joint locked solid the instant the flag was
+set, before anyone had configured a range at all, exactly backwards from
+"costs nothing until you use it." Fixed by gating the limit branches (not
+the motor, which has no such issue) on `lower < upper` explicitly — confirmed
+by a test that sets `enableMotorLimit = true` and applies a hard torque/force
+with the range left untouched, checking the joint still moves freely.
+`DistanceJoint` sidesteps the same footgun differently: `createDistanceJoint()`
+sets `minLength = maxLength = length` at creation, so its default range isn't
+`[0, 0]`, it's `[creation length, creation length]` — a zero-*width* range
+that reproduces the old exact-length behavior via two coincident one-sided
+limits instead of one equality constraint, rather than a range that happens
+to sit at zero.
 
 **Continuous collision detection** (`World::enableCcd`, `applyCcd()`): after
 `integrateVelocities()` moves a Dynamic circle Body or a Matter object, if
@@ -1181,7 +1221,7 @@ Bound API surface:
 | `BodyType` | `.Static`, `.Kinematic`, `.Dynamic` |
 | `Matter` | a point-mass object, NOT a rigidbody -- see Features above (Matter section) for what's genuinely different about it. `.position`, `.velocity`, `.restitution`, `.friction`, `.linear_damping`, `.gravity_scale`, `.name`, `.matter_kind` (`MatterKind.Matter`/`MatterKind.OptiMatter`), `.collision_category`/`.collision_mask` (Box2D-style filtering, see "Physics engine capabilities" above), `.radius` (settable -- recomputes mass, like `.density` below), `.texture_path`, `.color_r`/`.color_g`/`.color_b` (0-255, settable individually), `.density` (settable, recomputes mass), `.mass` (read), `.is_awake` (read), `:set_color(r,g,b)` (all three channels at once), `:apply_force(v)`, `:apply_impulse(v)`, `:wake()`, `:set_velocity(x,y)`, `:set_position(x,y)` -- deliberately no `.rotation`/`.angular_velocity`/`.type`/`:apply_torque`, none of which mean anything for something that never rotates |
 | `MatterKind` | `.Rigidbody`, `.Matter`, `.OptiMatter` -- see Features above (Matter section); `.Rigidbody` only makes sense on `Body` (a `Matter` object defaults to `.Matter` and has no reason to be `.Rigidbody`) |
-| `DistanceJoint`/`RevoluteJoint`/`WeldJoint`/`PrismaticJoint` | rigid, bilateral constraints -- see "Physics engine capabilities" above for what each one constrains. All four: `.body_a`/`.body_b` (read). `DistanceJoint` additionally: `.length` (settable -- the rope/rod's rest length). Created via `world:create_*_joint(...)` (above), removed via `world:remove_*_joint(j)` -- also cleaned up automatically if either body is removed with `world:remove_body()`. |
+| `DistanceJoint`/`RevoluteJoint`/`WeldJoint`/`PrismaticJoint` | rigid, bilateral constraints -- see "Physics engine capabilities" above for what each one constrains. All four: `.body_a`/`.body_b` (read). `DistanceJoint` additionally: `.length` (settable -- the rope/rod's rest length). Created via `world:create_*_joint(...)` (above), removed via `world:remove_*_joint(j)` -- also cleaned up automatically if either body is removed with `world:remove_body()`. `DistanceJoint`/`RevoluteJoint`/`PrismaticJoint` (not `WeldJoint`, no free DOF) additionally have `.enable_motor_limit` (off by default, same cost as before when off -- see "Physics engine capabilities" above) plus, once that's on: `DistanceJoint` -- `.min_length`/`.max_length`/`.motor_speed`/`.max_motor_force`; `RevoluteJoint` -- `.lower_angle`/`.upper_angle`/`.motor_speed`/`.max_motor_torque`; `PrismaticJoint` -- `.lower_translation`/`.upper_translation`/`.motor_speed`/`.max_motor_force`. |
 | `SCRIPT_PATH` | the currently-running script's own path — pass it to `attach_script` to make a spawned body self-replicate with the same script |
 | `attach_script(body, path)` | attaches/reloads a script on a body spawned from within another script |
 | `create_spring(bodyA, bodyB, stiffness, damping)` | ties two *existing* bodies together with a spring (rest length = their current distance apart) -- editor-only, like `soft_body.*`/`ui.*` below (needs `EditorApp`'s bookkeeping to persist/simulate) |
@@ -1320,11 +1360,11 @@ wiring it into the UI.
 - Polygon shapes are assumed to be defined with their centroid at the local
   origin (true for `MakeBox`); off-center convex polygons will have
   incorrect rotational dynamics.
-- Rigid joints (`DistanceJoint`/`RevoluteJoint`/`WeldJoint`/`PrismaticJoint`,
-  see "Physics engine capabilities" above) have no motors or limits (angle
-  ranges, distance ranges) yet — each is exactly the bare constraint its
-  name implies, nothing more. `WeldJoint`/`PrismaticJoint` also solve their
-  two constraints as independent sequential passes rather than one coupled
+- `DistanceJoint`/`RevoluteJoint`/`PrismaticJoint` have optional motors and
+  limits now (`enableMotorLimit`, see "Physics engine capabilities" below)
+  — `WeldJoint` doesn't, since it has no free DOF to drive or bound in the
+  first place. `WeldJoint`/`PrismaticJoint` still solve their two base
+  constraints as independent sequential passes rather than one coupled
   system (a deliberate simplification, see that section). No editor
   support yet either (Inspector/Spawn-tool/persistence) — script-only, like
   `p2d::Matter` below.
